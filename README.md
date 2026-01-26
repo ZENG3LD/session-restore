@@ -52,9 +52,9 @@ Simply say "restore session" or "восстанови сессию" and Claude w
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/claude-session-restore
-cd claude-session-restore/session-summary
-cargo build --release
+git clone https://github.com/ZENG3LD/claude-session-restore
+cd claude-session-restore
+cargo build --release --workspace
 ```
 
 The binary will be at `target/release/session-summary` (or `session-summary.exe` on Windows).
