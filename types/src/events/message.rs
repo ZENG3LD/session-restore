@@ -119,6 +119,7 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     /// Extract text if this is a text block
+    #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(&text.text),
@@ -127,6 +128,7 @@ impl ContentBlock {
     }
 
     /// Extract tool use if this is a tool use block
+    #[must_use]
     pub fn as_tool_use(&self) -> Option<(&str, &str, &JsonValue)> {
         match self {
             Self::ToolUse(tool) => Some((&tool.id, &tool.name, &tool.input)),
@@ -135,6 +137,7 @@ impl ContentBlock {
     }
 
     /// Extract thinking if this is a thinking block
+    #[must_use]
     pub fn as_thinking(&self) -> Option<&str> {
         match self {
             Self::Thinking(thinking) => Some(&thinking.thinking),
@@ -143,16 +146,19 @@ impl ContentBlock {
     }
 
     /// Check if this is a tool result
+    #[must_use]
     pub fn is_tool_result(&self) -> bool {
         matches!(self, Self::ToolResult(_))
     }
 
     /// Check if this is an attachment
+    #[must_use]
     pub fn is_attachment(&self) -> bool {
         matches!(self, Self::Attachment(_))
     }
 
     /// Check if this is a thinking block
+    #[must_use]
     pub fn is_thinking(&self) -> bool {
         matches!(self, Self::Thinking(_))
     }

@@ -313,7 +313,7 @@ pub struct TodoItem {
     #[serde(rename = "activeForm")]
     pub active_form: String,
 
-    /// Task status: "pending", "in_progress", "completed"
+    /// Task status: "pending", "`in_progress`", "completed"
     pub status: String,
 }
 

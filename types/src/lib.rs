@@ -2,6 +2,9 @@
 //!
 //! This library provides Rust types for parsing Claude Code session JSONL files.
 
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::doc_markdown)]
+
 pub mod events;
 
 // Re-export main types for convenience

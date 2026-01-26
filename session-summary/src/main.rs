@@ -3,11 +3,15 @@
 //! Quick summary tool for Claude Code session files.
 //! Uses reverse parsing from end of file for efficiency.
 
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+
 use anyhow::{Context, Result};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use claude_session_types::events::{ProgressData, SessionEvent};
-use colored::*;
+use colored::Colorize;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
@@ -273,7 +277,7 @@ fn load_session_context(path: &Path) -> Result<()> {
     if !context.user_messages.is_empty() {
         println!("\n{} 💬 {}", "User Messages".bold(), format!("({} messages)", context.user_messages.len()).dimmed());
         for (i, msg) in context.user_messages.iter().take(10).enumerate() {
-            println!("  {}. {}", i + 1, truncate(&msg, 150).bright_white());
+            println!("  {}. {}", i + 1, truncate(msg, 150).bright_white());
         }
         if context.user_messages.len() > 10 {
             println!("  {} ({} more)", "...".dimmed(), context.user_messages.len() - 10);
@@ -528,12 +532,10 @@ fn extract_last_segment_context(path: &Path) -> Result<FullContext> {
     // Find last compact boundary
     let mut last_boundary_idx = None;
     for (i, line) in lines.iter().enumerate().rev() {
-        if let Ok(event) = serde_json::from_str::<SessionEvent>(line) {
-            if let SessionEvent::System(sys) = event {
-                if sys.is_compact_boundary() {
-                    last_boundary_idx = Some(i);
-                    break;
-                }
+        if let Ok(SessionEvent::System(sys)) = serde_json::from_str::<SessionEvent>(line) {
+            if sys.is_compact_boundary() {
+                last_boundary_idx = Some(i);
+                break;
             }
         }
     }
@@ -572,7 +574,7 @@ fn extract_last_segment_context(path: &Path) -> Result<FullContext> {
                 }
 
                 SessionEvent::FileSnapshot(snapshot) => {
-                    for (path, _) in &snapshot.snapshot.tracked_file_backups {
+                    for path in snapshot.snapshot.tracked_file_backups.keys() {
                         let cleaned = path.replace("\\\\", "/");
                         files.insert(cleaned);
                     }
@@ -656,155 +658,7 @@ fn extract_commit_hints(prompt: &str, hints: &mut HashSet<String>) {
     }
 }
 
-/// Infer topic from agent task prompt
-fn infer_topic_from_task(task: &str) -> String {
-    let lower = task.to_lowercase();
-
-    if lower.contains("implement") || lower.contains("add") {
-        format!("Implementation: {}", truncate(task, 60))
-    } else if lower.contains("fix") || lower.contains("debug") {
-        format!("Fixing: {}", truncate(task, 60))
-    } else if lower.contains("refactor") {
-        format!("Refactoring: {}", truncate(task, 60))
-    } else if lower.contains("test") {
-        format!("Testing: {}", truncate(task, 60))
-    } else {
-        truncate(task, 60)
-    }
-}
-
-/// Infer topic from tool uses and edited files
-fn infer_topic_from_tools_and_files(tool_uses: &[(String, Vec<String>)], edited_files: &[String]) -> String {
-    // Extract file extensions and names
-    let mut file_types = std::collections::HashSet::new();
-    let mut all_files: Vec<String> = edited_files.to_vec();
-
-    for (_, paths) in tool_uses {
-        all_files.extend(paths.clone());
-    }
-
-    for file in &all_files {
-        if let Some(ext) = file.split('.').last() {
-            file_types.insert(ext.to_lowercase());
-        }
-    }
-
-    // Check tool types
-    let tool_names: Vec<&str> = tool_uses.iter().map(|(name, _)| name.as_str()).collect();
-
-    // Determine activity type
-    if tool_names.contains(&"Write") || tool_names.contains(&"Edit") {
-        if file_types.contains("rs") {
-            format!("Code: Rust development ({})", all_files.len())
-        } else if file_types.contains("ts") || file_types.contains("tsx") || file_types.contains("js") {
-            format!("Code: TypeScript/JS development ({})", all_files.len())
-        } else if file_types.contains("py") {
-            format!("Code: Python development ({})", all_files.len())
-        } else if file_types.contains("md") {
-            "Docs: Writing documentation".to_string()
-        } else {
-            format!("Code: Editing files ({} files)", all_files.len())
-        }
-    } else if tool_names.contains(&"Read") || tool_names.contains(&"Grep") || tool_names.contains(&"Glob") {
-        "Research: Exploring codebase".to_string()
-    } else if !all_files.is_empty() {
-        let file_preview = all_files.first().unwrap().split('/').last().unwrap_or("files");
-        format!("Work on: {}", file_preview)
-    } else {
-        "Work in progress".to_string()
-    }
-}
-
-/// Infer topic from bash commands
-fn infer_topic_from_bash(commands: &[String]) -> String {
-    for cmd in commands {
-        let lower = cmd.to_lowercase();
-        if lower.contains("cargo build") || lower.contains("compiling") {
-            return "Build: Compiling Rust project".to_string();
-        } else if lower.contains("npm install") || lower.contains("yarn add") {
-            return "Setup: Installing dependencies".to_string();
-        } else if lower.contains("git commit") {
-            return "Git: Committing changes".to_string();
-        } else if lower.contains("pytest") || lower.contains("cargo test") {
-            return "Testing: Running tests".to_string();
-        }
-    }
-    "Terminal work".to_string()
-}
-
-/// Infer topic from user messages
-fn infer_topic_from_user_messages(messages: &[String]) -> String {
-    // Take the most recent non-trivial message
-    for msg in messages.iter().rev() {
-        let msg_lower = msg.to_lowercase();
-
-        // Skip very short messages
-        if msg.len() < 15 {
-            continue;
-        }
-
-        // Skip file paths and technical noise
-        if msg.starts_with("C:\\") || msg.starts_with("/") || msg.contains(".json") || msg.contains(".rs") {
-            continue;
-        }
-
-        // Skip system/tool messages
-        if msg.contains("[Request interrupted")
-            || msg.contains("Work on:")
-            || msg.contains("Work in progress")
-            || msg.contains("Empty session")
-            || msg.contains("Recent Sessions:")
-            || msg.contains("session-summary.exe")
-        {
-            continue;
-        }
-
-        // Skip common trivial messages
-        if msg_lower.contains("hello")
-            || msg_lower.contains("привет")
-            || msg_lower.contains("продолжи")
-            || msg_lower.contains("continue")
-            || msg_lower.contains("ты тут")
-            || msg_lower.contains("давай")
-            || msg_lower.contains("окей")
-            || msg_lower.contains("да,")
-            || msg_lower.contains("yes")
-            || msg_lower.contains("запусти")
-            || msg_lower.contains("посмотр")
-            || msg_lower.starts_with("#")  // Цитаты моих же ответов
-        {
-            continue;
-        }
-
-        // Extract first meaningful sentence/phrase (UTF-8 safe)
-        let preview = if msg.len() > 80 {
-            let mut boundary = 80;
-            while boundary > 0 && !msg.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            format!("{}...", &msg[..boundary].trim())
-        } else {
-            msg.trim().to_string()
-        };
-
-        // Categorize based on keywords
-        if msg_lower.contains("implement") || msg_lower.contains("имплемент") || msg_lower.contains("добавь") {
-            return format!("Implementation: {}", preview);
-        } else if msg_lower.contains("fix") || msg_lower.contains("исправ") || msg_lower.contains("фикс") {
-            return format!("Fixing: {}", preview);
-        } else if msg_lower.contains("test") || msg_lower.contains("тест") {
-            return format!("Testing: {}", preview);
-        } else if msg_lower.contains("refactor") || msg_lower.contains("рефактор") {
-            return format!("Refactoring: {}", preview);
-        } else if msg_lower.contains("research") || msg_lower.contains("исследуй") || msg_lower.contains("загугли") {
-            return format!("Research: {}", preview);
-        } else {
-            return format!("Work on: {}", preview);
-        }
-    }
-
-    "Work in progress".to_string()
-}
+// NOTE: Topic inference functions removed - we now collect raw data and let Claude analyze it
 
 /// Shorten path for display
 fn shorten_path(path: &str) -> String {
@@ -842,6 +696,6 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} bytes", bytes)
+        format!("{bytes} bytes")
     }
 }

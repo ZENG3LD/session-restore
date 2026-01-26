@@ -316,7 +316,7 @@ impl UserEvent {
             .message
             .content
             .iter()
-            .filter_map(|block| block.as_text().map(|s| s.to_string()))
+            .filter_map(|block| block.as_text().map(std::string::ToString::to_string))
             .collect();
 
         if texts.is_empty() {
@@ -404,7 +404,7 @@ impl AssistantEvent {
             .message
             .content
             .iter()
-            .filter_map(|block| block.as_text().map(|s| s.to_string()))
+            .filter_map(|block| block.as_text().map(std::string::ToString::to_string))
             .collect();
 
         if texts.is_empty() {
@@ -602,7 +602,7 @@ fn extract_path_from_json(value: &JsonValue) -> Option<String> {
         .get("file_path")
         .or_else(|| value.get("filePath"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 // Display implementations

@@ -255,8 +255,8 @@ mod tests {
 
         let metadata = event.compact_metadata().unwrap();
         assert_eq!(metadata.trigger, "auto");
-        assert_eq!(metadata.pre_tokens, 156594);
-        assert_eq!(metadata.post_tokens, Some(50000));
+        assert_eq!(metadata.pre_tokens, 156_594);
+        assert_eq!(metadata.post_tokens, Some(50_000));
 
         assert_eq!(
             event.logical_parent_uuid,

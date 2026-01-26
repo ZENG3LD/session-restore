@@ -327,12 +327,16 @@ impl root::TokenUsage {
     }
 
     /// Effective input tokens with cache discount (90% for reads)
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn effective_input(&self) -> f64 {
         (self.input_tokens + self.cache_creation_input_tokens) as f64
             + (self.cache_read_input_tokens as f64 * 0.1)
     }
 
     /// Calculate cost in USD based on model pricing
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn calculate_cost(&self, model: &str) -> Option<f64> {
         let (input_cost, output_cost) = match normalize_model_name(model) {
             "haiku" => (1.0 / 1_000_000.0, 5.0 / 1_000_000.0),
@@ -353,13 +357,14 @@ impl root::TokenUsage {
     }
 
     /// Format cost as human-readable string
+    #[must_use]
     pub fn format_cost(&self, model: &str) -> String {
         match self.calculate_cost(model) {
             Some(cost) => {
                 if cost < 0.01 {
-                    format!("${:.4}", cost)
+                    format!("${cost:.4}")
                 } else {
-                    format!("${:.2}", cost)
+                    format!("${cost:.2}")
                 }
             }
             None => "Unknown model".to_string(),
