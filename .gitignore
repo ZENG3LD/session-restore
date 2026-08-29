@@ -1,0 +1,35 @@
+# Build
+target/
+node_modules/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.*
+env/
+*.pem
+*.key
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+
+# Agent artifacts (internal, not public)
+docs/research/
+CLAUDE.md
+.nemo-service.toml
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
