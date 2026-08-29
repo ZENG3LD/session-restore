@@ -8,7 +8,7 @@ whenToUse: When the user asks to restore, find, or continue a previous/last Kimi
 
 Restore full context when starting a new session after the previous one was closed, crashed, rebooted, or compacted away.
 
-Uses the `kimi-session-restore` CLI (installed at `~/.local/bin/kimi-session-restore.exe`, source: `nemo/kimi-session-restore/`). It parses Kimi Code session storage directly — do NOT parse `wire.jsonl` by hand with python/grep; use the tool.
+Uses the `kimi-session-restore` CLI (installed at `~/.local/bin/kimi-session-restore.exe`, source: `nemo/session-restore/crates/kimi-session-restore/`). It parses Kimi Code session storage directly — do NOT parse `wire.jsonl` by hand with python/grep; use the tool.
 
 ## Session storage layout (reference)
 
