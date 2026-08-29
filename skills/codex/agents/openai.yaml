@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Session Restore"
+  short_description: "Restore bounded context across agent sessions"
+  default_prompt: "Use $codex-restore-session to restore bounded context from an explicitly selected Codex, Claude, or Kimi session."

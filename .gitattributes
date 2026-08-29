@@ -1,0 +1,3 @@
+# core.autocrlf=true on this box would hand the install scripts CRLF on
+# checkout, and a \r in the shebang line makes bash refuse the file.
+*.sh text eol=lf

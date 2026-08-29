@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/claude-session-types",
+    "crates/claude-session-restore",
+    "crates/grok-session-restore",
+    "crates/kimi-session-restore",
+    "crates/codex-session-restore",
+]
+
+# Profiles are only honoured at the workspace root, so the per-crate
+# `[profile.release]` blocks the four CLIs used to carry live here.
+[profile.release]
+opt-level = 2

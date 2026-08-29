@@ -1,0 +1,15 @@
+[package]
+name = "claude-session-types"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZENG3LD <zengeld.github@proton.me>"]
+license = "MIT OR Apache-2.0"
+description = "Type definitions for Claude Code session event parsing"
+repository = "https://github.com/ZENG3LD/claude-session-restore"
+keywords = ["claude", "session", "parser", "types"]
+categories = ["parsing", "development-tools"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
