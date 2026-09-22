@@ -49,7 +49,7 @@ fi
 "$helper" "${args[@]}"
 ```
 
-The Claude `list` command does not accept `--home`. If a bound Claude source root is present but no selector was supplied, ask for the selector instead of listing a different home.
+If a bound Claude source root is present but no selector was supplied, `list --home "$GATE4AGENT_RESTORE_CLAUDE_HOME"` first to find candidates in that home, rather than listing the default Claude home.
 
 ## When to Use
 
@@ -81,34 +81,34 @@ session-summary.exe list --projects-only
 - **Date/time**: When it was last modified
 - **Size**: File size (indicates session length)
 - **Source**: [projects] or [archive]
-- **Topic**: Simple label (Agent tasks, User session, Tool usage, etc.)
-- **Multi-vector data**: Raw data from different event sources with emoji labels:
-  - 📋 Tasks - Agent task prompts
-  - 💬 User - User messages
-  - 🔧 Tools - Tool operations with file paths
-  - ⚙️ Bash - Bash command outputs
-  - 🔍 Search - Web search queries
+- **Topic**: the session's own title — Claude Code's `custom-title` if the session has one, else its `ai-title`, else the latest `last-prompt`, else the session's first real human prompt. This is the provider's own title, not an inferred label — trust it.
+- **Preview lines** with emoji labels, each one a verbatim quote from the transcript:
+  - 📋 Tasks - delegated agent task prompts (only present on older sessions with `agent_progress` events; rare on current transcripts)
+  - 💬 User - user messages
+  - 🔧 Tools - tool calls with their key argument (e.g. `Bash: cargo build --release`)
+  - ⚙️ Bash - bash commands recognized as build/test/git activity
+  - 🔍 Search - web search queries
+
+If the window is empty, the tool says so and suggests widening it (`--max-age-hours <N>` or `--all`) — don't assume "no output" means "no sessions".
 
 **Example output**:
 ```
 Recent Sessions:
 
 1. 8f59d651-cada-4484-9153-5cc577137486
-   Jan 26 04:33 | 32.42 MB | [projects] | Agent tasks
-   📋 Tasks: Fix the dropdown z-order problem... → Fix the dropdown... → Fix the dropdown...
+   Jan 26 04:33 | 32.42 MB | [projects] | Chart Settings dropdown z-order fix
    💬 User: дропдауны либо с 0 опасити... → закомить работу...
-   🔧 Tools: Bash, Bash, Bash, Write
+   🔧 Tools: Bash: cargo build --release, Edit: chart_settings.rs
 
 2. 4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0
-   Jan 26 05:47 | 103.69 MB | [projects] | Agent tasks
-   📋 Tasks: Implement MOEX ISS API connector... → Implement MOEX ISS API connector... → Implement MOEX ISS API connector...
-   💬 User: <ide_opened_file>The user opened... → да, какие проблемы выявлены...
-   🔧 Tools: Bash, Bash, Bash, Task, Task
+   Jan 26 05:47 | 103.69 MB | [projects] | MOEX ISS API connector
+   💬 User: да, какие проблемы выявлены... → продолжи
+   🔧 Tools: Bash: cargo test, Task: implement MOEX connector
 
 3. 3162998f-09ca-4efc-b659-8507eb57bd37
-   Jan 26 00:21 | 232.79 MB | [archive] | User session
+   Jan 26 00:21 | 232.79 MB | [archive] | Create 2-turn conversation test
    💬 User: Create 2-turn conversation test... → Run the tests...
-   🔧 Tools: Task, Bash, Grep, Read, Write
+   🔧 Tools: Grep: fn main, Read: tests/conversation.rs
    ⚙️ Bash: cargo check; compiling...
 
 To load a session, use:
@@ -135,27 +135,25 @@ Session: 8f59d651-cada-4484-9153-5cc577137486
 ═══════════════════════════════════════
 Date: 2026-01-26 04:33:18
 Size: 32.42 MB
-Topic: Agent tasks
-
-Agent Tasks 📋 (126 tasks)
-  1. СРОЧНО! Dropdown перекрывается другими элементами (footer, другие UI)...
-  2. Fix dropdown z-order problem in Chart Settings modal
-  3. Implement hover states for dropdown items
-  4. Add auto-sizing to dropdown containers
-  ... (122 more)
+Topic: Chart Settings dropdown z-order fix
 
 User Messages 💬 (2 messages)
   1. закомить работу в ваших крейтах (чужую не комить)
   2. итого подведи итог что мы сделали по унификации...
 
+Assistant Texts 🤖 (3 texts)
+  1. Готово — коммит сделан только в наших крейтах, чужие не трогал.
+  2. Итог: унифицировал dropdown z-order через общий overlay-слой...
+  3. ...
+
 Tool Operations 🔧 (7 operations)
-  1. Task
-  2. Bash
-  3. Edit (zengeld-terminal/ui/chart_settings.rs)
-  4. Read (zengeld-terminal/ui/dropdown.rs)
+  1. Task: fix dropdown z-order in Chart Settings modal
+  2. Bash: cargo build --release
+  3. Edit: zengeld-terminal/ui/chart_settings.rs
+  4. Read: zengeld-terminal/ui/dropdown.rs
   ... (3 more)
 
-Files Modified 📁 (17 files)
+Files Touched 📁 (17 files)
   1. zengeld-terminal/ui/chart_settings.rs
   2. zengeld-terminal/ui/dropdown.rs
   3. zengeld-terminal/ui/modal.rs
@@ -165,11 +163,10 @@ Git Branch: zengeld-chart
 ```
 
 The tool automatically:
-- Reads last segment of session from compact_boundary to end
-- Collects data from 6+ event types (AgentProgress, User, Assistant, BashProgress, QueryUpdate, FileSnapshot)
-- Shows all data vectors with counts and previews
-- Does NOT try to infer topics - just shows raw data
-- Extracts git branch and commit hints for further analysis
+- Reads a byte-budgeted window from the end of the file (bounded, not a full-file scan — a multi-gigabyte transcript still loads in well under a second)
+- Restricts that window to events after the last compaction boundary, when one is present
+- Prints every section as verbatim quotes: user prompts, assistant text, tool calls with their key argument, system errors, files touched, git branch, and commit-message hints found in the quoted text
+- Never writes its own summary of what happened — Step 3 cross-checks these quotes against git, and Step 4 presents them; neither step rewrites them in the model's own words
 
 ### Step 3: Search Git History
 
@@ -190,56 +187,16 @@ git show --stat <commit-hash>
 - Commit messages describing the feature/fix being worked on
 - File changes that match the session's tracked files
 
-### Step 4: Analyze Multi-Vector Data & Provide Context Summary
+### Step 4: Show the Digest, Then Continue the Work
 
-**IMPORTANT**: The parser shows RAW DATA in multiple vectors. Your job is to ANALYZE this data and understand what was being worked on.
-
-Look at all vectors:
-- **Agent Tasks** - What agents were doing (feature implementation, debugging, refactoring)
-- **User Messages** - What user was asking for, decisions made
-- **Tool Operations** - Which files were read/edited, what operations performed
-- **Bash Activities** - Build/test commands, git operations
-- **Web Searches** - Research topics, API documentation lookups
-- **Files Modified** - Scope of changes
-
-Present a structured summary:
-
-```markdown
-## Session Restoration Summary
-
-**Session**: [session-id]
-**Date**: [timestamp]
-**Project**: [project-name]
-
-### What Was Being Worked On:
-[Analyze the multi-vector data to determine the main task/feature/bugfix]
-
-### Files Being Worked On:
-- path/to/file1.rs (main implementation)
-- path/to/file2.rs (supporting changes)
-- ...
-
-### Related Git Commits:
-- [hash] commit message (date)
-- [hash] commit message (date)
-
-### Context from Session Data:
-- **Agent focus**: [from Tasks vector]
-- **User requests**: [from User Messages vector]
-- **Technical operations**: [from Tools/Bash vectors]
-
-### Recommendations:
-- Continue from: [specific file or task]
-- Next steps: [based on commit history and unfinished work]
-```
+Show the user (or just yourself, if working unattended) the tool's own output — the `Topic`, `User Messages`, `Assistant Texts`, `Tool Operations`, `Errors`, and `Files Touched` sections it already printed in Step 2, plus whatever related commits Step 3 found. Do not write your own prose summary of "what was being worked on" — the verbatim quotes and the commit list already say that; paraphrasing them risks misstating something the transcript said precisely. Then continue the actual work: open the files it named, pick up the last unfinished task, or ask the one clarifying question the quotes leave open.
 
 ## Important Notes
 
-- **Session files can be VERY large** (2GB+) - session-summary handles this efficiently
-- **Tool uses tail + reverse parsing** - reads from end, stops early
-- **Multi-vector approach** - parser collects raw data, you analyze it
-- **Don't assume topic from label** - "Agent tasks" is just a simple label, analyze the actual data
-- **Git commits are the best context** - they show what was actually accomplished
+- **Session files can be VERY large** (2GB+) — reads are byte-budgeted from both ends of the file (a bounded seek + read, not a full-file scan), so this stays fast regardless of file size
+- **Digest, not summary** — every section is a verbatim quote from the transcript; never write your own synthesis of what the session covered
+- **Topic is the provider's own title** — `custom-title` first, then `ai-title`, then `last-prompt`, then the session's first real human prompt; trust it, don't second-guess it against the raw data
+- **Git commits are the best independent check** — they show what was actually accomplished, versus what the transcript merely discussed
 - **Timestamps help** - cross-reference session time with commit times
 - **Time filtering** - default 12 hours, can extend to 24 hours with --max-age-hours
 
@@ -256,21 +213,19 @@ I'll list recent sessions from the last 12 hours:
 Recent Sessions:
 
 1. 8f59d651-cada-4484-9153-5cc577137486
-   Jan 26 04:33 | 32.42 MB | [projects] | Agent tasks
-   📋 Tasks: Fix the dropdown z-order problem... → Fix the dropdown... → Fix the dropdown...
+   Jan 26 04:33 | 32.42 MB | [projects] | Chart Settings dropdown z-order fix
    💬 User: дропдауны либо с 0 опасити... → закомить работу...
-   🔧 Tools: Bash, Bash, Bash, Write
+   🔧 Tools: Bash: cargo build --release, Edit: chart_settings.rs
 
 2. 4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0
-   Jan 26 05:47 | 103.69 MB | [projects] | Agent tasks
-   📋 Tasks: Implement MOEX ISS API connector... → Implement MOEX ISS API connector...
-   💬 User: <ide_opened_file>... → да, какие проблемы выявлены...
-   🔧 Tools: Bash, Bash, Task, Task
+   Jan 26 05:47 | 103.69 MB | [projects] | MOEX ISS API connector
+   💬 User: да, какие проблемы выявлены... → продолжи
+   🔧 Tools: Bash: cargo test, Task: implement MOEX connector
 
 3. 3162998f-09ca-4efc-b659-8507eb57bd37
-   Jan 26 00:21 | 232.79 MB | [archive] | User session
+   Jan 26 00:21 | 232.79 MB | [archive] | Create 2-turn conversation test
    💬 User: Create 2-turn conversation test... → Run the tests...
-   🔧 Tools: Task, Bash, Grep, Read
+   🔧 Tools: Grep: fn main, Read: tests/conversation.rs
    ⚙️ Bash: cargo check; compiling...
 
 To load a session, use:
@@ -284,16 +239,9 @@ Assistant: [Runs the load command]
 
 [runs: session-summary.exe load "C:\Users\...\8f59d651-cada-4484-9153-5cc577137486.jsonl"]
 
-[Analyzes multi-vector data]
-
-Based on the session data:
-- **Main task**: Fixing dropdown z-order issue in Chart Settings modal
-- **User requested**: Commit work in your crates, summarize unification work
-- **Agent worked on**: UI dropdown rendering, z-order fixes, hover states
-- **Files modified**: chart_settings.rs, dropdown.rs, modal.rs
-
+[Shows the tool's own Topic/User Messages/Assistant Texts/Tool Operations/Files Touched output verbatim]
 [Searches git log for related commits]
-[Provides full context summary]
+[Continues from the last file the digest and git log point to — no rewritten summary]
 ```
 
 ## Implementation Tips
@@ -303,6 +251,7 @@ Based on the session data:
 3. **Parse JSONL carefully**: Each line is a separate JSON object
 4. **Cross-reference**: Session files + git log = complete picture
 5. **Ask user**: If multiple sessions found, let user choose
+6. **`--json`** is available on both `list` and `load` for machine consumption; the human-readable format above is unchanged when `--json` is omitted
 
 ## Limitations
 

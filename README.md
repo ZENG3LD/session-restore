@@ -78,12 +78,13 @@ All four answer `list` and `load`. The flags have not been unified yet:
 
 |  | `--json` | `--all` | `--full-summary` | `--home` |
 | --- | --- | --- | --- | --- |
-| `session-summary` | no | no | no | `load` only |
+| `session-summary` | **yes** | **yes** | no | **yes** (`list` and `load`) |
 | `grok-session-restore` | no | yes | yes | yes |
 | `kimi-session-restore` | no | no | yes | `list` only |
-| `codex-session-restore` | **yes** | yes | — | yes |
+| `codex-session-restore` | yes | yes | — | yes |
 
-Machine consumers need `--json` from all four. Only Codex has it today.
+Machine consumers need `--json` from all four. Claude and Codex have it; Grok and
+Kimi are still open work.
 
 ## Trust boundary
 

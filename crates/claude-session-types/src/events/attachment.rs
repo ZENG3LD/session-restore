@@ -236,6 +236,26 @@ pub enum AttachmentType {
     Unknown,
 }
 
+impl AttachmentType {
+    /// Snake-case name of this variant, matching the wire `type` tag (e.g.
+    /// `"hook_success"`, `"todo_reminder"`).
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::HookSuccess(_) => "hook_success",
+            Self::HookFailure(_) => "hook_failure",
+            Self::HookProgress(_) => "hook_progress",
+            Self::TodoReminder(_) => "todo_reminder",
+            Self::CriticalSystemReminder(_) => "critical_system_reminder",
+            Self::EditedTextFile(_) => "edited_text_file",
+            Self::EditedNotebookCell(_) => "edited_notebook_cell",
+            Self::FileSnapshot(_) => "file_snapshot",
+            Self::AgentSpawn(_) => "agent_spawn",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Hook execution success
 ///
 /// Most common attachment type (~31k per session).

@@ -38,13 +38,46 @@ use serde_json::Value as JsonValue;
 ///   ]
 /// }
 /// ```
+///
+/// # Wire format drift
+///
+/// Real Claude Code transcripts (v2.1.2xx) put a bare JSON **string** in
+/// `content` for plain single-turn human prompts, not the documented array of
+/// content blocks — the array form is only used once the turn carries
+/// structured pieces (tool results, images, thinking). Both shapes are
+/// accepted: a bare string normalizes to a single [`ContentBlock::Text`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageContent {
     /// Role: "user" or "assistant"
     pub role: String,
 
     /// Content blocks (text, tool use, tool results, etc.)
+    ///
+    /// Accepts either the documented array-of-blocks shape or a bare string
+    /// (the common shape for plain-text human prompts on disk).
+    #[serde(deserialize_with = "deserialize_content_blocks")]
     pub content: Vec<ContentBlock>,
+}
+
+/// Deserialize `content` as either a bare string or an array of content blocks.
+///
+/// A bare string becomes a single `ContentBlock::Text`, matching how the array
+/// form represents the same plain-text turn.
+fn deserialize_content_blocks<'de, D>(deserializer: D) -> Result<Vec<ContentBlock>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ContentRepr {
+        Text(String),
+        Blocks(Vec<ContentBlock>),
+    }
+
+    match ContentRepr::deserialize(deserializer)? {
+        ContentRepr::Text(text) => Ok(vec![ContentBlock::Text(TextBlock { text })]),
+        ContentRepr::Blocks(blocks) => Ok(blocks),
+    }
 }
 
 /// Content block discriminator
@@ -287,9 +320,16 @@ pub struct ToolResultBlock {
 
     /// Structured tool use result (for file operations)
     ///
-    /// Present when tool modifies files (Write, Edit)
-    /// See `tool_result` module for detailed types
-    #[serde(rename = "toolUseResult")]
+    /// Present when tool modifies files (Write, Edit). Deserialized leniently:
+    /// a `type` tag that no known `ToolUseResult` shape matches (e.g. a
+    /// `"text"`-tagged result missing the plain `content` field) becomes
+    /// `None` instead of failing the whole enclosing event — see
+    /// [`crate::events::tool_result::deserialize_tool_use_result_lenient`].
+    #[serde(
+        rename = "toolUseResult",
+        deserialize_with = "crate::events::tool_result::deserialize_tool_use_result_lenient",
+        default
+    )]
     pub tool_use_result: Option<crate::events::tool_result::ToolUseResult>,
 }
 

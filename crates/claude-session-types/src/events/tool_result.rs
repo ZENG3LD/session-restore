@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
 
 /// Tool use result discriminator
@@ -234,6 +234,28 @@ impl ToolUseResult {
             _ => None,
         }
     }
+}
+
+/// Deserialize an optional `toolUseResult` field leniently.
+///
+/// The `type` tag on a real transcript sometimes matches a known
+/// [`ToolUseResult`] variant while the surrounding shape does not — e.g. a
+/// `"text"`-tagged result that carries a `file` object instead of the
+/// documented plain `content: String` (observed in real system-reminder tool
+/// results). Internally tagged enums commit to the matched variant once the
+/// tag is read, so a shape mismatch there fails the whole field, and because
+/// this field lives on the same struct as the message text, that failure used
+/// to drop the entire surrounding event — losing a real human-visible turn
+/// over an untyped structured extra. Any shape that does not fit a known
+/// variant is treated as absent (`None`) rather than propagated as an error.
+pub fn deserialize_tool_use_result_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<ToolUseResult>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<JsonValue> = Option::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| serde_json::from_value(raw).ok()))
 }
 
 /// Text result (most common)
@@ -542,6 +564,48 @@ mod tests {
             assert_eq!(image.source.data, "iVBORw0KGgo=");
             assert_eq!(image.file_path, Some("/tmp/screenshot.png".to_string()));
         }
+    }
+
+    #[test]
+    fn test_lenient_tool_use_result_accepts_matching_shape() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tool_use_result_lenient", default)]
+            result: Option<ToolUseResult>,
+        }
+
+        let json = r#"{"result":{"type":"text","content":"cargo build succeeded"}}"#;
+        let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+        assert!(matches!(wrapper.result, Some(ToolUseResult::Text(_))));
+    }
+
+    #[test]
+    fn test_lenient_tool_use_result_drops_mismatched_shape_without_failing() {
+        // Real transcripts emit `toolUseResult: {"type":"text","file":{...}}`
+        // for system-reminder tool results — a "text" tag whose shape does
+        // not match `TextResult { content: String }`. This must not fail the
+        // enclosing deserialization.
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tool_use_result_lenient", default)]
+            result: Option<ToolUseResult>,
+        }
+
+        let json = r#"{"result":{"type":"text","file":{"filePath":"/tmp/x","content":"","numLines":1,"startLine":1,"totalLines":1}}}"#;
+        let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+        assert!(wrapper.result.is_none());
+    }
+
+    #[test]
+    fn test_lenient_tool_use_result_accepts_missing_field() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tool_use_result_lenient", default)]
+            result: Option<ToolUseResult>,
+        }
+
+        let wrapper: Wrapper = serde_json::from_str("{}").unwrap();
+        assert!(wrapper.result.is_none());
     }
 
     #[test]

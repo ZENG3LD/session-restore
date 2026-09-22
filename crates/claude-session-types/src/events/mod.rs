@@ -73,15 +73,15 @@
 //! ## Parsing Root Events
 //!
 //! ```rust
-//! use zengeld_memory_core::sources::claude::SessionEvent;
+//! use claude_session_types::events::{SessionEvent, ProgressData};
 //!
-//! let line = r#"{"type": "user", ...}"#;
+//! let line = r#"{"type": "user", "uuid": "test-uuid", "sessionId": "session-1", "timestamp": "2024-01-01T00:00:00Z", "isSidechain": false, "message": {"role": "user", "content": "hello"}}"#;
 //! let event: SessionEvent = serde_json::from_str(line)?;
 //!
 //! match event {
 //!     SessionEvent::User(user) => {
 //!         // Access user message content
-//!         for block in &user.message.content {
+//!         for _block in &user.message.content {
 //!             // Process content blocks
 //!         }
 //!     }
@@ -105,7 +105,7 @@
 //! ## Accessing Nested Content
 //!
 //! ```rust
-//! use zengeld_memory_core::sources::claude::{SessionEvent, ContentBlock};
+//! use claude_session_types::events::{SessionEvent, ContentBlock, ToolUseResult};
 //!
 //! # let event: SessionEvent = serde_json::from_str(r#"{"type": "user", "uuid": "test", "timestamp": "2024-01-01T00:00:00Z", "sessionId": "test", "parentUuid": null, "isSidechain": false, "cwd": "/test", "message": {"role": "user", "content": []}}"#)?;
 //! if let SessionEvent::User(user) = event {
@@ -140,18 +140,19 @@
 //! `.data.normalized_messages[]`, which recursively contains all event types:
 //!
 //! ```rust
-//! use zengeld_memory_core::sources::claude::{SessionEvent, ProgressData, NormalizedMessage};
+//! use claude_session_types::events::SessionEvent;
+//! use claude_session_types::events::progress::NormalizedMessage;
 //!
-//! # let event: SessionEvent = serde_json::from_str(r#"{"type": "progress", "uuid": "test", "timestamp": "2024-01-01T00:00:00Z", "sessionId": "test", "parentUuid": null, "isSidechain": false, "cwd": "/test", "data": {"type": "bash_progress", "output": "", "fullOutput": "", "elapsedTimeSeconds": 0, "totalLines": 0, "normalizedMessages": []}}"#)?;
+//! # let event: SessionEvent = serde_json::from_str(r#"{"type": "progress", "uuid": "test", "timestamp": "2024-01-01T00:00:00Z", "sessionId": "test", "parentUuid": null, "isSidechain": false, "cwd": "/test", "data": {"type": "bash_progress", "output": "", "fullOutput": "", "elapsedTimeSeconds": 0, "totalLines": 0, "message": {}, "normalizedMessages": []}}"#)?;
 //! if let SessionEvent::Progress(progress) = event {
 //!     // Access normalized messages (conversation replay)
 //!     if let Some(normalized) = progress.data.normalized_messages() {
 //!         for msg in normalized {
 //!             match msg {
-//!                 NormalizedMessage::User(user) => {
+//!                 NormalizedMessage::User(_user) => {
 //!                     println!("User turn");
 //!                 }
-//!                 NormalizedMessage::Assistant(assistant) => {
+//!                 NormalizedMessage::Assistant(_assistant) => {
 //!                     println!("Assistant turn");
 //!                 }
 //!                 NormalizedMessage::Attachment(attachment) => {
@@ -179,7 +180,9 @@ pub use message::{ContentBlock, MessageContent};
 pub use metadata::EventMetadata;
 pub use progress::{ProgressData, ProgressEvent};
 pub use root::{
-    AssistantMessage, CacheCreation, FileHistorySnapshot, QueueOperation, SessionEvent,
+    AgentNameEvent, AiTitleEvent, AssistantMessage, AtisLatchEvent, BridgeSessionEvent,
+    CacheCreation, CustomTitleEvent, FileHistoryDeltaEvent, FileHistorySnapshot, LastPromptEvent,
+    ModeEvent, PermissionModeEvent, QueueOperation, RootAttachmentEvent, SessionEvent,
     SessionSummary, Snapshot, TokenUsage,
 };
 pub use system::{CompactMetadata, SystemEvent};
@@ -219,11 +222,10 @@ impl SessionEvent {
 
                 for block in &e.message.content {
                     match block {
-                        ContentBlock::Text(_) => {
-                            if !tags.contains(&"text".to_string()) {
-                                tags.push("text".to_string());
-                            }
+                        ContentBlock::Text(_) if !tags.contains(&"text".to_string()) => {
+                            tags.push("text".to_string());
                         }
+                        ContentBlock::Text(_) => {}
                         ContentBlock::ToolUse(tool) => {
                             tags.push("tool_use".to_string());
                             tags.push(tool.name.clone());
@@ -294,6 +296,21 @@ impl SessionEvent {
             }
 
             Self::Summary(_) => vec!["summary".to_string()],
+
+            Self::Attachment(e) => {
+                vec!["attachment".to_string(), e.attachment.type_name().to_string()]
+            }
+            Self::CustomTitle(_) => vec!["custom_title".to_string()],
+            Self::AiTitle(_) => vec!["ai_title".to_string()],
+            Self::LastPrompt(_) => vec!["last_prompt".to_string()],
+            Self::BridgeSession(_) => vec!["bridge_session".to_string()],
+            Self::AtisLatch(_) => vec!["atis_latch".to_string()],
+            Self::Mode(e) => vec!["mode".to_string(), e.mode.clone()],
+            Self::PermissionMode(e) => {
+                vec!["permission_mode".to_string(), e.permission_mode.clone()]
+            }
+            Self::AgentName(_) => vec!["agent_name".to_string()],
+            Self::FileHistoryDelta(_) => vec!["file_history_delta".to_string()],
 
             Self::Unknown => vec!["unknown".to_string()],
         }
