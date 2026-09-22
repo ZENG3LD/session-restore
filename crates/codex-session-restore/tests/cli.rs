@@ -73,3 +73,72 @@ fn isolated_cli_lists_and_loads_exact_id_without_leaking_fixture_secret() {
     assert!(!combined.contains("FIXTURE_SECRET_MUST_NOT_ESCAPE"));
     assert!(!combined.contains("C:\\private"));
 }
+
+#[test]
+fn empty_window_prints_a_widen_hint() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("sessions")).unwrap();
+
+    let executable = env!("CARGO_BIN_EXE_codex-session-restore");
+    let output = Command::new(executable)
+        .env("CODEX_HOME", home.path())
+        .args(["list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Try --all or --max-age-hours"),
+        "expected a widen hint, got: {stdout}"
+    );
+
+    let widened = Command::new(executable)
+        .env("CODEX_HOME", home.path())
+        .args(["list", "--all"])
+        .output()
+        .unwrap();
+    assert!(widened.status.success());
+    let widened_stdout = String::from_utf8_lossy(&widened.stdout);
+    assert_eq!(widened_stdout.trim(), "No matching Codex sessions.");
+}
+
+#[test]
+fn human_report_surfaces_tool_operations_and_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join("sessions/2026/09/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "89abcdef-1234-4234-8234-abcdef012345";
+    let path = sessions.join(format!("rollout-2026-09-01T00-00-00-{id}.jsonl"));
+    let mut file = File::create(path).unwrap();
+    for record in [
+        serde_json::json!({
+            "timestamp": "2026-09-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": id, "cwd": "C:\\work\\demo"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-09-01T00:00:01Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "shell", "call_id": "call_1", "arguments": "{\"command\":\"rg TODO\"}"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-09-01T00:00:02Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "error": {"message": "usage limit hit"}}
+        }),
+    ] {
+        writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+    }
+
+    let executable = env!("CARGO_BIN_EXE_codex-session-restore");
+    let output = Command::new(executable)
+        .env("CODEX_HOME", home.path())
+        .args(["load", id])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("recent_tool_operations:"), "stdout: {stdout}");
+    assert!(stdout.contains("shell: rg TODO"), "stdout: {stdout}");
+    assert!(stdout.contains("- error: usage limit hit"), "stdout: {stdout}");
+}

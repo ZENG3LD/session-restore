@@ -58,7 +58,12 @@ fn run_list(args: &[OsString]) -> Result<(), RestoreError> {
     if json {
         println!("{}", encode_json(&candidates)?);
     } else if candidates.is_empty() {
-        println!("No matching Codex sessions.");
+        match max_age_hours {
+            Some(hours) => println!(
+                "No matching Codex sessions in the last {hours}h. Try --all or --max-age-hours <N>."
+            ),
+            None => println!("No matching Codex sessions."),
+        }
     } else {
         for candidate in candidates {
             let title = candidate.title.as_deref().unwrap_or("untitled");

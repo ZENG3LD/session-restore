@@ -21,6 +21,12 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOOL_NAMES: usize = 64;
 const MAX_FILE_HINTS: usize = 64;
+/// How many of the most recent tool calls are kept for the "Recent Tool
+/// Operations" section — a compact, ordered trace of what actually ran,
+/// separate from the full-session name histogram in `tools.counts`.
+const MAX_RECENT_TOOL_OPS: usize = 15;
+/// Cap on a single tool operation's key-argument excerpt.
+const TOOL_OP_DETAIL_CHARS: usize = 200;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RestoreLimits {
@@ -113,12 +119,27 @@ pub struct SessionCandidate {
 pub enum MessageRole {
     User,
     Assistant,
+    /// A tool call's output (`function_call_output` / `custom_tool_call_output`).
+    Tool,
+    /// A session-level failure (`event_msg.task_complete.error.message`).
+    Error,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Message {
     pub role: MessageRole,
     pub text: String,
+    pub timestamp: Option<String>,
+}
+
+/// A single tool invocation's key argument, captured verbatim (bounded and
+/// redacted) so the "last N events" digest shows what actually ran instead
+/// of only a name tally. See `ToolInventory::counts` for the full-session
+/// histogram, which stays as a secondary, coarser view.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ToolOperation {
+    pub name: String,
+    pub detail: String,
     pub timestamp: Option<String>,
 }
 
@@ -151,6 +172,7 @@ pub struct SessionReport {
     pub schema: &'static str,
     pub meta: SessionMeta,
     pub messages: Vec<Message>,
+    pub tool_ops: Vec<ToolOperation>,
     pub tools: ToolInventory,
     pub git: GitHints,
     pub truncated: bool,
@@ -227,10 +249,22 @@ pub fn list_sessions(
         if meta.id != file_id {
             continue;
         }
+        // Titles come from session_index.jsonl when present. When the
+        // index has none, pay for one bounded head-read of the rollout
+        // itself and fall back to the first real human prompt, instead of
+        // leaving every untitled session looking identical in `list`.
+        let mut title = titles.get(&meta.id).cloned();
+        if title.is_none() {
+            let mut ignored_redactions = 0;
+            title = first_human_prompt(&path)
+                .ok()
+                .flatten()
+                .and_then(|prompt| safe_scalar(&prompt, 256, &mut ignored_redactions));
+        }
         candidates.push(SessionCandidate {
             path,
             id: meta.id.clone(),
-            title: titles.get(&meta.id).cloned(),
+            title,
             updated_unix_ms: system_time_millis(modified),
             size_bytes: metadata.len(),
         });
@@ -308,8 +342,12 @@ pub fn load_session(
     }
     let mut response_user = Vec::new();
     let mut response_assistant = Vec::new();
+    let mut response_tool_output = Vec::new();
     let mut event_user = Vec::new();
     let mut event_assistant = Vec::new();
+    let mut event_error = Vec::new();
+    let mut tool_ops: Vec<ToolOperation> = Vec::new();
+    let mut tool_call_names: BTreeMap<String, String> = BTreeMap::new();
     let mut tools = ToolInventory::default();
     let mut cwd = parsed_meta.cwd.clone();
     let mut model = None;
@@ -361,6 +399,49 @@ pub fn load_session(
                         );
                     }
                 }
+                // Forward-compat: current Codex builds wrap turns as
+                // `item_completed { item: { type: "user_message"/"agent_message", ... } }`
+                // instead of the flat `user_message`/`agent_message` variants above.
+                // Every session inspected so far also carries the same content via
+                // `response_item`, so this arm is additive, not yet load-bearing.
+                Some("item_completed") => {
+                    if let Some(item) = payload.get("item") {
+                        match item.get("type").and_then(Value::as_str) {
+                            Some("user_message") => {
+                                if let Some(text) = item_text(item) {
+                                    push_message(
+                                        &mut event_user,
+                                        ordinal,
+                                        timestamp,
+                                        &text,
+                                        &mut redactions,
+                                    );
+                                }
+                            }
+                            Some("agent_message") => {
+                                if let Some(text) = item_text(item) {
+                                    push_message(
+                                        &mut event_assistant,
+                                        ordinal,
+                                        timestamp,
+                                        &text,
+                                        &mut redactions,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some("task_complete") => {
+                    if let Some(text) = payload
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                    {
+                        push_message(&mut event_error, ordinal, timestamp, text, &mut redactions);
+                    }
+                }
                 Some("patch_apply_end") => record_changed_files(&mut tools, payload, cwd.as_deref()),
                 _ => {}
             },
@@ -379,9 +460,50 @@ pub fn load_session(
                         }
                     }
                 }
+                // A bare `agent_message` at the response_item level (e.g. a
+                // subagent's own reply) carries no `role` field and uses a
+                // `content` array instead of `message`; surface it as
+                // assistant text, same as the event_msg fallback above.
+                Some("agent_message") => {
+                    if let Some(text) = item_text(payload) {
+                        if !looks_injected(&text) {
+                            push_message(
+                                &mut response_assistant,
+                                ordinal,
+                                timestamp,
+                                &text,
+                                &mut redactions,
+                            );
+                        }
+                    }
+                }
                 Some("function_call") | Some("custom_tool_call") => {
                     if let Some(name) = payload.get("name").and_then(Value::as_str) {
                         record_tool_name(&mut tools, name);
+                        if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                            tool_call_names.insert(call_id.to_owned(), name.to_owned());
+                        }
+                        if let Some(detail) = extract_tool_detail(payload) {
+                            push_tool_op(&mut tool_ops, timestamp, name, &detail, &mut redactions);
+                        }
+                    }
+                }
+                Some("function_call_output") | Some("custom_tool_call_output") => {
+                    if let Some(text) = payload.get("output").and_then(extract_text_value) {
+                        let name = payload
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .and_then(|call_id| tool_call_names.get(call_id))
+                            .cloned()
+                            .unwrap_or_else(|| "tool".to_owned());
+                        let combined = format!("{name} -> {text}");
+                        push_message(
+                            &mut response_tool_output,
+                            ordinal,
+                            timestamp,
+                            &combined,
+                            &mut redactions,
+                        );
                     }
                 }
                 _ => {}
@@ -391,11 +513,19 @@ pub fn load_session(
         }
     }
 
+    if tool_ops.len() > MAX_RECENT_TOOL_OPS {
+        let drop_count = tool_ops.len() - MAX_RECENT_TOOL_OPS;
+        tool_ops.drain(..drop_count);
+        truncated = true;
+    }
+
     let mut messages = Vec::with_capacity(
         event_user.len()
             + response_user.len()
             + event_assistant.len()
-            + response_assistant.len(),
+            + response_assistant.len()
+            + response_tool_output.len()
+            + event_error.len(),
     );
     messages.extend(response_user.into_iter().map(|message| (MessageRole::User, message)));
     messages.extend(event_user.into_iter().map(|message| (MessageRole::User, message)));
@@ -409,12 +539,25 @@ pub fn load_session(
             .into_iter()
             .map(|message| (MessageRole::Assistant, message)),
     );
+    messages.extend(
+        response_tool_output
+            .into_iter()
+            .map(|message| (MessageRole::Tool, message)),
+    );
+    messages.extend(event_error.into_iter().map(|message| (MessageRole::Error, message)));
     messages.sort_by_key(|(_, message)| message.ordinal);
     let mut deduplicated = Vec::with_capacity(messages.len());
     for message in messages {
+        // Codex writes the same human/agent turn twice under two encodings
+        // (`response_item.message`, whose parts this parser joins with an
+        // extra "\n", and the flat `event_msg.*` string) that differ only by
+        // incidental whitespace. Compare on collapsed whitespace so that
+        // pair merges into one entry, while two messages with different
+        // words never collapse into each other.
         let duplicate = deduplicated.last().is_some_and(
             |(last_role, last_message): &(MessageRole, TimedMessage)| {
-                *last_role == message.0 && last_message.text == message.1.text
+                *last_role == message.0
+                    && normalize_for_dedup(&last_message.text) == normalize_for_dedup(&message.1.text)
             },
         );
         if !duplicate {
@@ -440,10 +583,20 @@ pub fn load_session(
         .and_then(Path::file_name)
         .and_then(OsStr::to_str)
         .and_then(|value| safe_scalar(value, 128, &mut redactions));
+    // Provider title first; when the store has none, fall back to the
+    // earliest real human prompt (bounded head scan, independent of the
+    // tail-bounded record read above so it still works on sessions whose
+    // opening turn falls outside that window).
     let title = source
         .title
         .as_deref()
-        .and_then(|value| safe_scalar(value, 256, &mut redactions));
+        .and_then(|value| safe_scalar(value, 256, &mut redactions))
+        .or_else(|| {
+            first_human_prompt(&source.path)
+                .ok()
+                .flatten()
+                .and_then(|prompt| safe_scalar(&prompt, 256, &mut redactions))
+        });
     let mut report = SessionReport {
         schema: "codex-session-restore-v1",
         meta: SessionMeta {
@@ -461,6 +614,7 @@ pub fn load_session(
                 .and_then(|value| safe_scalar(value, 128, &mut redactions)),
         },
         messages,
+        tool_ops,
         tools,
         git: parsed_meta.git,
         truncated,
@@ -508,8 +662,16 @@ pub fn render_report(report: &SessionReport) -> String {
         let role = match message.role {
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+            MessageRole::Error => "error",
         };
         output.push_str(&format!("- {role}: {}\n", message.text.replace('\n', " ")));
+    }
+    if !report.tool_ops.is_empty() {
+        output.push_str("recent_tool_operations:\n");
+        for op in &report.tool_ops {
+            output.push_str(&format!("- {}: {}\n", op.name, op.detail.replace('\n', " ")));
+        }
     }
     if !report.tools.counts.is_empty() {
         output.push_str("tool_counts:\n");
@@ -715,6 +877,54 @@ fn parse_session_meta(line: &str) -> Result<Option<ParsedMeta>, RestoreError> {
     }))
 }
 
+/// Scan the first `MAX_HEAD_BYTES` of a rollout file for the earliest
+/// genuine human prompt, used as a topic fallback when a session has no
+/// title in `session_index.jsonl`. This is independent of `load`'s
+/// tail-bounded record read, so it still finds the opening prompt on a
+/// session whose first turn falls outside that tail window.
+fn first_human_prompt(path: &Path) -> Result<Option<String>, RestoreError> {
+    let mut file = open_shared_read(path)?;
+    let mut head = Vec::new();
+    (&mut file).take(MAX_HEAD_BYTES as u64).read_to_end(&mut head)?;
+    for raw in head.split(|byte| *byte == b'\n') {
+        if raw.is_empty() || raw.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        let Ok(line) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let record_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        let text = match record_type {
+            "event_msg" if payload.get("type").and_then(Value::as_str) == Some("user_message") => {
+                payload.get("message").and_then(Value::as_str).map(str::to_owned)
+            }
+            "response_item"
+                if payload.get("type").and_then(Value::as_str) == Some("message")
+                    && payload.get("role").and_then(Value::as_str) == Some("user") =>
+            {
+                let text = message_content(payload, "user");
+                (!text.is_empty()).then_some(text)
+            }
+            _ => None,
+        };
+        let Some(text) = text else {
+            continue;
+        };
+        if looks_injected(&text) {
+            continue;
+        }
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
 fn read_bounded_records(
     source: &SessionSource,
     limits: RestoreLimits,
@@ -819,6 +1029,74 @@ fn message_content(payload: &Value, role: &str) -> String {
         .join("\n")
 }
 
+/// Extract plain text from a JSON value that may be a bare string, an
+/// object carrying `content`/`text`, or an array of such parts. Codex uses
+/// all three shapes across `function_call_output.output`,
+/// `custom_tool_call_output.output`, and bare `response_item.agent_message`
+/// / `item_completed` item payloads.
+fn extract_text_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(_) => value
+            .get("content")
+            .and_then(extract_text_value)
+            .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned)),
+        Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(extract_text_value)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
+/// Text of a `user_message`/`agent_message` item under either shape Codex
+/// has used: a flat `message` string (what `event_msg`'s direct variants
+/// carry) or a `content` array / `text` field (what a bare
+/// `response_item.agent_message` and the newer `item_completed` wrapper
+/// carry instead).
+fn item_text(item: &Value) -> Option<String> {
+    item.get("message")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| item.get("content").and_then(extract_text_value))
+        .or_else(|| item.get("text").and_then(Value::as_str).map(str::to_owned))
+}
+
+/// The key argument of a tool call — the shell command, URL, query, or path
+/// a reviewer actually needs to see, not just the tool's name.
+/// `custom_tool_call.input` and `function_call.arguments` are read as
+/// either a JSON object (pull a well-known field) or, when that fails
+/// (`custom_tool_call.input` is often raw script text, not JSON), the raw
+/// string itself, bounded and redacted the same as any other excerpt.
+fn extract_tool_detail(payload: &Value) -> Option<String> {
+    let raw = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .and_then(Value::as_str)?;
+    let detail = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|parsed| salient_arg_field(&parsed))
+        .unwrap_or_else(|| raw.to_owned());
+    Some(detail)
+}
+
+fn salient_arg_field(value: &Value) -> Option<String> {
+    const KEYS: [&str; 8] = [
+        "command", "cmd", "url", "query", "path", "file_path", "pattern", "script",
+    ];
+    let object = value.as_object()?;
+    for key in KEYS {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+
 fn push_message(
     target: &mut Vec<TimedMessage>,
     ordinal: usize,
@@ -830,12 +1108,37 @@ fn push_message(
         return;
     }
     let text = redact_text(text, redactions);
-    let text = truncate_chars(text.trim(), MAX_MESSAGE_CHARS);
+    let text = truncate_message_tail(text.trim(), MAX_MESSAGE_CHARS);
     if !text.is_empty() {
         target.push(TimedMessage {
             ordinal,
             timestamp,
             text,
+        });
+    }
+}
+
+/// Push a tool operation onto `target`. Callers append in ordinal order
+/// during a single forward pass over the record stream, so `target` is
+/// already chronological without a separate sort step.
+fn push_tool_op(
+    target: &mut Vec<ToolOperation>,
+    timestamp: Option<String>,
+    name: &str,
+    detail: &str,
+    redactions: &mut u64,
+) {
+    if looks_injected(detail) {
+        return;
+    }
+    let redacted = redact_text(detail, redactions);
+    let first_line = redacted.lines().next().unwrap_or(&redacted);
+    let detail = truncate_chars(first_line.trim(), TOOL_OP_DETAIL_CHARS);
+    if !detail.is_empty() {
+        target.push(ToolOperation {
+            name: name.to_owned(),
+            detail,
+            timestamp,
         });
     }
 }
@@ -1018,12 +1321,45 @@ fn bounded_scalar(value: &str) -> String {
     truncate_chars(value.trim(), 128)
 }
 
+/// Truncate a short scalar (title, model, workspace label, …) to at most
+/// `max_chars`, keeping the HEAD. These are identifiers, not narrative
+/// text — the meaningful part is at the front. Message bodies use
+/// [`truncate_message_tail`] instead.
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut result: String = value.chars().take(max_chars).collect();
     if value.chars().count() > max_chars {
         result.push('…');
     }
     result
+}
+
+/// Truncate a message BODY to at most `max_chars`, keeping the TAIL. This
+/// crate's design keeps "the last N" throughout — the last bytes of a
+/// growing file, the last lines, the last messages — and per-message
+/// character truncation used to be the one place that kept the *first* N
+/// characters instead, cutting off a long tool-approval or error message
+/// right before its actionable ending. The dropped prefix is called out
+/// with an explicit `[truncated N chars]` marker instead of disappearing
+/// silently.
+fn truncate_message_tail(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_owned();
+    }
+    let cut = total_chars - max_chars;
+    let tail: String = text.chars().skip(cut).collect();
+    format!("[truncated {cut} chars]…{tail}")
+}
+
+/// Collapse whitespace runs (including newlines) before a dedup
+/// comparison. Codex writes the same human/agent turn twice under two
+/// encodings — `response_item.message` (whose parts this parser joins with
+/// an extra `"\n"`) and `event_msg.*` (a single flat string) — that differ
+/// only by incidental whitespace, not content. Comparing on collapsed
+/// whitespace merges exactly that pair while leaving two messages with
+/// different words distinct.
+fn normalize_for_dedup(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn repository_label(value: &str) -> Option<String> {
@@ -1126,22 +1462,40 @@ mod tests {
                 serde_json::json!({"timestamp":"4","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback assistant"}]}}),
                 serde_json::json!({"timestamp":"5","type":"event_msg","payload":{"type":"user_message","message":"Choose checked_add"}}),
                 serde_json::json!({"timestamp":"6","type":"event_msg","payload":{"type":"agent_message","message":"Preserve the public API"}}),
-                serde_json::json!({"timestamp":"7","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"HIDDEN_COMMAND"}}),
-                serde_json::json!({"timestamp":"8","type":"response_item","payload":{"type":"function_call_output","output":"HIDDEN_OUTPUT"}}),
+                serde_json::json!({"timestamp":"7","type":"response_item","payload":{"type":"function_call","name":"shell_command","call_id":"call_1","arguments":"VISIBLE_COMMAND_ARG"}}),
+                serde_json::json!({"timestamp":"8","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"VISIBLE_TOOL_OUTPUT"}}),
                 serde_json::json!({"timestamp":"9","type":"compacted","payload":{"replacement_history":"HIDDEN_COMPACTION"}}),
                 serde_json::json!({"timestamp":"10","type":"event_msg","payload":{"type":"patch_apply_end","changes":{"C:\\work\\demo\\src\\lib.rs":{"kind":"update"}},"stdout":"HIDDEN_PATCH_OUTPUT"}}),
             ],
         );
         let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
-        assert_eq!(report.messages.len(), 4);
+        assert_eq!(
+            report
+                .messages
+                .iter()
+                .filter(|message| matches!(message.role, MessageRole::User | MessageRole::Assistant))
+                .count(),
+            4
+        );
         assert!(report.messages.iter().any(|message| message.text == "fallback user"));
         assert!(report.messages.iter().any(|message| message.text == "fallback assistant"));
         assert!(report.messages.iter().any(|message| message.text == "Choose checked_add"));
         assert!(report.messages.iter().any(|message| message.text == "Preserve the public API"));
+        // D1: tool call arguments now surface in their own section.
+        assert_eq!(report.tool_ops.len(), 1);
+        assert_eq!(report.tool_ops[0].name, "shell_command");
+        assert_eq!(report.tool_ops[0].detail, "VISIBLE_COMMAND_ARG");
+        // D2: tool outputs now surface as their own message role.
+        assert!(report
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Tool && message.text.contains("VISIBLE_TOOL_OUTPUT")));
         let encoded = encode_json(&report).unwrap();
-        for hidden in ["HIDDEN_REASONING", "HIDDEN_DEVELOPER", "HIDDEN_COMMAND", "HIDDEN_OUTPUT", "HIDDEN_COMPACTION"] {
+        for hidden in ["HIDDEN_REASONING", "HIDDEN_DEVELOPER", "HIDDEN_COMPACTION"] {
             assert!(!encoded.contains(hidden));
         }
+        assert!(encoded.contains("VISIBLE_COMMAND_ARG"));
+        assert!(encoded.contains("VISIBLE_TOOL_OUTPUT"));
         assert_eq!(report.tools.counts.get("shell_command"), Some(&1));
         assert!(report.tools.changed_files.contains("src/lib.rs"));
         assert!(!encoded.contains("HIDDEN_PATCH_OUTPUT"));
@@ -1164,6 +1518,152 @@ mod tests {
         assert_eq!(report.messages.iter().filter(|m| m.role == MessageRole::User).count(), 1);
         assert!(report.messages.iter().any(|m| m.text == "canonical user"));
         assert!(report.messages.iter().any(|m| m.text == "assistant fallback"));
+    }
+
+    #[test]
+    fn dedup_collapses_dual_encoding_whitespace_variant_but_keeps_distinct_messages() {
+        let temp = fixture_home();
+        let id = "66666666-6666-4666-8666-666666666666";
+        write_session(
+            temp.path(),
+            id,
+            &[
+                // response_item joins parts with "\n"; the trailing "\n" on
+                // the first part plus the join's own "\n" produces a
+                // double newline, unlike the flat event_msg string below.
+                serde_json::json!({"timestamp":"1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"line one\n"},{"type":"input_text","text":"line two"}]}}),
+                serde_json::json!({"timestamp":"2","type":"event_msg","payload":{"type":"user_message","message":"line one\nline two"}}),
+                serde_json::json!({"timestamp":"3","type":"event_msg","payload":{"type":"user_message","message":"a genuinely different follow-up"}}),
+            ],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        let user_messages: Vec<_> =
+            report.messages.iter().filter(|m| m.role == MessageRole::User).collect();
+        assert_eq!(
+            user_messages.len(),
+            2,
+            "dual-encoding pair must collapse but the distinct follow-up must survive: {user_messages:?}"
+        );
+        assert!(user_messages[0].text.contains("line one"));
+        assert!(user_messages[1].text.contains("a genuinely different follow-up"));
+    }
+
+    #[test]
+    fn tool_call_arguments_are_captured_as_recent_tool_operations() {
+        let temp = fixture_home();
+        let id = "22222222-2222-4222-8222-222222222222";
+        write_session(
+            temp.path(),
+            id,
+            &[
+                serde_json::json!({"timestamp":"1","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_1","arguments":"{\"command\":\"rg -n TODO\"}"}}),
+                serde_json::json!({"timestamp":"2","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_2","input":"tools.exec_command({cmd:\"ls -la\"})"}}),
+            ],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        assert_eq!(report.tool_ops.len(), 2);
+        assert_eq!(report.tool_ops[0].name, "shell");
+        assert_eq!(report.tool_ops[0].detail, "rg -n TODO");
+        assert_eq!(report.tool_ops[1].name, "exec");
+        assert!(report.tool_ops[1].detail.contains("tools.exec_command"));
+    }
+
+    #[test]
+    fn tool_output_and_task_complete_error_are_surfaced() {
+        let temp = fixture_home();
+        let id = "33333333-3333-4333-8333-333333333333";
+        write_session(
+            temp.path(),
+            id,
+            &[
+                serde_json::json!({"timestamp":"1","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_9","arguments":"{\"command\":\"ls\"}"}}),
+                serde_json::json!({"timestamp":"2","type":"response_item","payload":{"type":"function_call_output","call_id":"call_9","output":"total 0\nfile.txt"}}),
+                serde_json::json!({"timestamp":"3","type":"response_item","payload":{"type":"agent_message","content":[{"type":"text","text":"Agent errored: usage limit reached"}]}}),
+                serde_json::json!({"timestamp":"4","type":"event_msg","payload":{"type":"task_complete","error":{"message":"You have hit your usage limit"}}}),
+            ],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        let tool_message = report
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool output message present");
+        assert!(tool_message.text.contains("shell -> total 0"));
+        let error_message = report
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Error)
+            .expect("error message present");
+        assert_eq!(error_message.text, "You have hit your usage limit");
+        assert!(report
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Assistant && m.text.contains("Agent errored")));
+    }
+
+    #[test]
+    fn item_completed_event_is_handled_for_forward_compatibility() {
+        let temp = fixture_home();
+        let id = "77777777-7777-4777-8777-777777777777";
+        write_session(
+            temp.path(),
+            id,
+            &[
+                serde_json::json!({"timestamp":"1","type":"event_msg","payload":{"type":"item_completed","item":{"type":"user_message","message":"future schema user turn"}}}),
+                serde_json::json!({"timestamp":"2","type":"event_msg","payload":{"type":"item_completed","item":{"type":"agent_message","message":"future schema assistant turn"}}}),
+            ],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        assert!(report
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::User && m.text == "future schema user turn"));
+        assert!(report
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Assistant && m.text == "future schema assistant turn"));
+    }
+
+    #[test]
+    fn title_falls_back_to_first_human_prompt_when_untitled() {
+        let temp = fixture_home();
+        let id = "44444444-4444-4444-8444-444444444444";
+        write_session(
+            temp.path(),
+            id,
+            &[
+                serde_json::json!({"timestamp":"1","type":"event_msg","payload":{"type":"user_message","message":"Investigate the failing build"}}),
+                serde_json::json!({"timestamp":"2","type":"event_msg","payload":{"type":"agent_message","message":"Looking into it"}}),
+            ],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        assert_eq!(report.meta.title.as_deref(), Some("Investigate the failing build"));
+
+        let candidates = list_sessions(temp.path(), None, 10).unwrap();
+        let candidate = candidates.iter().find(|c| c.id == id).expect("candidate present");
+        assert_eq!(candidate.title.as_deref(), Some("Investigate the failing build"));
+    }
+
+    #[test]
+    fn long_message_bodies_are_tail_truncated_with_marker() {
+        let temp = fixture_home();
+        let id = "55555555-5555-4555-8555-555555555555";
+        let filler = "A".repeat(5000);
+        let actionable_tail = "APPROVAL REQUEST: run rm -rf /tmp/example";
+        let long_message = format!("{filler}{actionable_tail}");
+        write_session(
+            temp.path(),
+            id,
+            &[serde_json::json!({"timestamp":"1","type":"event_msg","payload":{"type":"user_message","message": long_message}})],
+        );
+        let report = load_session(&source(temp.path(), id), RestoreLimits::default()).unwrap();
+        let message = &report.messages[0];
+        assert!(message.text.starts_with("[truncated "));
+        assert!(
+            message.text.ends_with(actionable_tail),
+            "tail must keep the actionable ending, got: {}",
+            message.text
+        );
     }
 
     #[test]
