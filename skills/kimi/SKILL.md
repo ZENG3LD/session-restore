@@ -24,9 +24,11 @@ Uses the `kimi-session-restore` CLI (installed at `~/.local/bin/kimi-session-res
 kimi-session-restore.exe list            # last 12 hours
 kimi-session-restore.exe list --all      # no time filter
 kimi-session-restore.exe list --max-age-hours 48
+kimi-session-restore.exe list --home "D:\alt\.kimi-code"   # non-default Kimi home
+kimi-session-restore.exe list --all --json                 # machine-readable
 ```
 
-Each entry shows: session id, last-modified time (UTC), wire size, workdir, title, last user prompt. If several sessions fit, ask the user which one to restore.
+Each entry shows: session id, last-modified time (local, with UTC offset), wire size, workdir, topic, last user prompt. The topic is `state.json`'s own `title` when it is set, otherwise the first genuine human prompt in the session (never a cron fire, task notification, or harness-injected turn). If several sessions fit, ask the user which one to restore.
 
 ### Step 2: Load the selected session
 
@@ -36,9 +38,13 @@ Copy the load command from the list output, or use the id prefix:
 kimi-session-restore.exe load "C:\Users\...\.kimi-code\sessions\<wd>\<session_id>"
 kimi-session-restore.exe load session_72cefc81          # id prefix works
 kimi-session-restore.exe load <target> --full-summary   # untruncated compaction summary
+kimi-session-restore.exe load <target> --json           # machine-readable
+kimi-session-restore.exe --help                         # full flag reference
 ```
 
-The report gives you: user messages with timestamps, steer/cron activity, tool-call histogram, files touched, last assistant messages, compaction history, and the last compaction summary (the previous session's own handoff notes — read it first, it usually contains state, conventions, and the TODO list).
+The report is a verbatim digest, never a paraphrase: the last 3 human prompts and last 3 assistant texts print in full (older ones in the window collapse to one line), followed by a "Recent Tool Operations" section — the last ~15 tool.call events in chronological order with their key argument (path, command, pattern, …) — then the usual tool histogram, files-touched inventory, steer/cron activity, and compaction history. The last compaction summary is the previous session's own handoff notes — read it first, it usually contains state, conventions, and the TODO list.
+
+Reads are byte-budgeted (last 32 MiB of `wire.jsonl` for the digest, first 1 MiB for the title/first-prompt fallback), so a huge session still loads in well under a second. If the file is bigger than that window, the report says so explicitly instead of silently showing an incomplete picture.
 
 ### Step 3: Cross-reference git history
 
