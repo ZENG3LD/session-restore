@@ -74,17 +74,24 @@ canonical sources.
 
 ## Command surface
 
-All four answer `list` and `load`. The flags have not been unified yet:
+All four answer `list` and `load`, and all four now take `--json`, `--home`,
+`--all`, `--max-age-hours N`, and `-h`/`--help` (help prints to stdout, exit 0).
+`load` renders a verbatim tail of the last events — last human prompts, last
+assistant texts, and recent tool operations with their key args and errors, in
+order — never an agent-written summary; provider-authored compaction summaries
+are hidden from the digest and shown, clearly labelled, only under
+`--full-summary` (Grok, Kimi) where the store carries them.
 
 |  | `--json` | `--all` | `--full-summary` | `--home` |
 | --- | --- | --- | --- | --- |
-| `session-summary` | **yes** | **yes** | no | **yes** (`list` and `load`) |
-| `grok-session-restore` | no | yes | yes | yes |
-| `kimi-session-restore` | no | no | yes | `list` only |
-| `codex-session-restore` | yes | yes | — | yes |
+| `session-summary` | **yes** | **yes** | n/a | **yes** (`list` and `load`) |
+| `grok-session-restore` | **yes** | yes | yes | yes |
+| `kimi-session-restore` | **yes** | yes | yes | yes (`list` and `load`) |
+| `codex-session-restore` | yes | yes | n/a | yes |
 
-Machine consumers need `--json` from all four. Claude and Codex have it; Grok and
-Kimi are still open work.
+`--json` emits UTC/ISO-8601 timestamps; human output uses local time with a
+numeric offset. Large transcripts are read tail-first under a byte budget, so
+`load` stays sub-second on multi-GB session files.
 
 ## Trust boundary
 
