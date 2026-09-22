@@ -57,10 +57,17 @@ Copy the load command from the list output, or use an id prefix:
 ```bash
 grok-session-restore.exe load "C:\Users\...\.grok\sessions\<cwd>\<session_id>"
 grok-session-restore.exe load 01a00078
-grok-session-restore.exe load <target> --full-summary
+grok-session-restore.exe load <target> --json
 ```
 
-Read first: `Last turn` and the last compaction summary. Then user messages, tools, files, todos, subagent ids.
+Read, in this order — all of these are verbatim quotes from `updates.jsonl`/`chat_history.jsonl`, never a paraphrase:
+
+1. **User Messages** — the human's own prompts.
+2. **Assistant Texts** — the model's own last replies, verbatim.
+3. **Recent Tool Operations** (and **Errors**, if present) — tool calls with their actual argument (command, path, query, ...), outputs, and failures, in chronological order.
+4. Files touched, plan todos, subagent ids.
+
+The **Store note** line and any **Compaction summary** are the *store's own* LLM-written paraphrases of the session, not session events — treat them as low-confidence hints only, never as the primary record. The compaction body is hidden by default; `--full-summary` opts in, and it stays clearly labeled "LLM-written, not session events" when shown.
 
 ### Step 3: Structured summary
 
@@ -68,7 +75,7 @@ Read first: `Last turn` and the last compaction summary. Then user messages, too
 ## Session Restoration Summary
 **Session**: [id] | **Date**: [span] | **Project**: [cwd]
 ### What was being worked on
-### Open threads / next steps (last turn + last user prompt + compaction)
+### Open threads / next steps (from Assistant Texts + Recent Tool Operations, verbatim)
 ### Files / tools in play
 ```
 
@@ -79,4 +86,6 @@ Do not start git archaeology, crate walks, or foreign-session loads unless the u
 - `GROK_HOME` overrides `~/.grok`. Pass `--home` only when the user names a different root.
 - `chat_history` rows with `synthetic_reason` are injected reminders, not user orders.
 - `agent_thought_chunk` / `type=reasoning` are hidden reasoning — the CLI does not print them; do not go fishing for them.
-- Compaction summaries are the previous session's own notes, not proof.
+- Compaction summaries are the previous session's own notes, not proof — the CLI hides the body by default and labels it when `--full-summary` reveals it.
+- `summary.json`'s own `last_turn_summary` (shown as the "Store note" line) is likewise the store's own paraphrase, not a session event — the digest sections above are the verbatim source.
+- Add `--json` to `list` or `load` for machine-readable output (schema `grok-session-restore-{list,load}-v1`).
