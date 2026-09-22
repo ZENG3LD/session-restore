@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["ZENG3LD <zengeld.github@proton.me>"]
 license = "MIT OR Apache-2.0"
 description = "CLI tool for summarizing and restoring Claude Code sessions"
-repository = "https://github.com/ZENG3LD/claude-session-restore"
+repository = "https://github.com/ZENG3LD/session-restore"
 keywords = ["claude", "session", "cli", "restore"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -14,7 +14,7 @@ name = "session-summary"
 path = "src/main.rs"
 
 [dependencies]
-claude-session-types = { path = "../claude-session-types" }
+claude-session-types = { path = "../claude-session-types", version = "0.1.0" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
