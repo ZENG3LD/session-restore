@@ -39,9 +39,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use clap::{Parser, Subcommand};
-use claude_session_types::events::{ProgressData, SessionEvent};
+use claude_session_types::events::{ProgressData, SessionEvent, UserTurnKind};
 use colored::Colorize;
 use regex::Regex;
 use serde::Serialize;
@@ -544,9 +544,14 @@ fn last_last_prompt(events: &[SessionEvent]) -> Option<String> {
     })
 }
 
+/// First genuine human turn (a topic fallback) — excludes slash commands and
+/// harness notifications, per [`UserTurnKind`].
 fn first_human_prompt(events: &[SessionEvent]) -> Option<String> {
     events.iter().find_map(|event| match event {
-        SessionEvent::User(user) => user.human_prompt_text().map(str::to_owned),
+        SessionEvent::User(user) => match user.classify_turn() {
+            UserTurnKind::HumanPrompt(text) => Some(text.to_owned()),
+            _ => None,
+        },
         _ => None,
     })
 }
@@ -603,6 +608,13 @@ struct SessionDigest {
     commit_hints: Vec<String>,
     truncated: bool,
     unknown_type_counts: Vec<(String, u64)>,
+    /// Count of `user` turns classified as
+    /// [`claude_session_types::events::UserTurnKind::HarnessNotification`]
+    /// within the scanned window: task notifications, compaction summaries,
+    /// peer/cross-session messages, local-command echoes, `isMeta` turns, and
+    /// tool-result-only turns. Kept so filtering them out of the digest is
+    /// visible, not silent.
+    harness_notifications_skipped: u64,
 }
 
 struct DigestLimits {
@@ -628,9 +640,17 @@ fn load_limits(debug: bool) -> DigestLimits {
     }
 }
 
-fn push_capped(items: &mut Vec<String>, value: String, cap: usize) {
-    if items.len() < cap {
-        items.push(value);
+/// Keep only the last `cap` entries of `items`, preserving order.
+///
+/// Digest vectors are collected in chronological order across the whole
+/// scanned window; a session with more real turns than `cap` must keep the
+/// *most recent* ones, not whichever were encountered first — showing the
+/// earliest N turns of a long window as "the digest" silently hides
+/// everything since, including the very last thing the user said.
+fn truncate_to_last(items: &mut Vec<String>, cap: usize) {
+    if items.len() > cap {
+        let drop_count = items.len() - cap;
+        items.drain(..drop_count);
     }
 }
 
@@ -672,34 +692,38 @@ fn build_digest(path: &Path, limits: &DigestLimits) -> Result<SessionDigest> {
                 if let Some(branch) = &user.metadata.git_branch {
                     digest.git_branch = Some(branch.clone());
                 }
-                if let Some(text) = user.human_prompt_text() {
-                    extract_commit_hints(text, &mut commit_hints);
-                    push_capped(&mut digest.user_messages, text.to_string(), limits.max_items);
+                match user.classify_turn() {
+                    UserTurnKind::HumanPrompt(text) => {
+                        extract_commit_hints(text, &mut commit_hints);
+                        digest.user_messages.push(text.to_string());
+                    }
+                    UserTurnKind::SlashCommand { name, args } => {
+                        digest.user_messages.push(render_slash_command(name, args));
+                    }
+                    UserTurnKind::HarnessNotification => {
+                        digest.harness_notifications_skipped += 1;
+                    }
                 }
             }
             SessionEvent::Assistant(assistant) => {
                 for block in &assistant.message.content {
                     if let Some(text) = block.as_text() {
                         extract_commit_hints(text, &mut commit_hints);
-                        push_capped(&mut digest.assistant_texts, text.to_string(), limits.max_items);
+                        digest.assistant_texts.push(text.to_string());
                     }
                     if let Some((_, name, input)) = block.as_tool_use() {
-                        push_capped(
-                            &mut digest.tool_operations,
-                            describe_tool_use(name, input),
-                            limits.max_items * 3,
-                        );
-                        record_tool_side_effects(name, input, limits, &mut digest, &mut files);
+                        digest.tool_operations.push(describe_tool_use(name, input));
+                        record_tool_side_effects(name, input, &mut digest, &mut files);
                     }
                 }
             }
             SessionEvent::Progress(progress) => match &progress.data {
                 ProgressData::AgentProgress(agent) => {
                     extract_commit_hints(&agent.prompt, &mut commit_hints);
-                    push_capped(&mut digest.agent_tasks, agent.prompt.clone(), limits.max_items);
+                    digest.agent_tasks.push(agent.prompt.clone());
                 }
                 ProgressData::QueryUpdate(query) => {
-                    push_capped(&mut digest.web_queries, query.query.clone(), limits.max_items);
+                    digest.web_queries.push(query.query.clone());
                 }
                 _ => {}
             },
@@ -715,11 +739,19 @@ fn build_digest(path: &Path, limits: &DigestLimits) -> Result<SessionDigest> {
                     .map(|error| format!("{}: {}", error.error_type, error.message))
                     .or_else(|| sys.content.clone())
                     .unwrap_or_else(|| "unspecified system error".to_string());
-                push_capped(&mut digest.errors, message, limits.max_items);
+                digest.errors.push(message);
             }
             _ => {}
         }
     }
+
+    truncate_to_last(&mut digest.agent_tasks, limits.max_items);
+    truncate_to_last(&mut digest.user_messages, limits.max_items);
+    truncate_to_last(&mut digest.assistant_texts, limits.max_items);
+    truncate_to_last(&mut digest.tool_operations, limits.max_items * 3);
+    truncate_to_last(&mut digest.bash_activities, limits.max_items);
+    truncate_to_last(&mut digest.web_queries, limits.max_items);
+    truncate_to_last(&mut digest.errors, limits.max_items);
 
     digest.files = files.into_iter().collect();
     digest.files.sort();
@@ -729,10 +761,20 @@ fn build_digest(path: &Path, limits: &DigestLimits) -> Result<SessionDigest> {
     Ok(digest)
 }
 
+/// Render a slash-command turn for display: `/model claude-fable-5`, or just
+/// `/compact` when there are no arguments.
+fn render_slash_command(name: &str, args: &str) -> String {
+    let args = args.trim();
+    if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {args}")
+    }
+}
+
 fn record_tool_side_effects(
     name: &str,
     input: &JsonValue,
-    limits: &DigestLimits,
     digest: &mut SessionDigest,
     files: &mut HashSet<String>,
 ) {
@@ -749,13 +791,13 @@ fn record_tool_side_effects(
         "Bash" => {
             if let Some(command) = input.get("command").and_then(JsonValue::as_str) {
                 if is_interesting_bash(command) {
-                    push_capped(&mut digest.bash_activities, command.to_string(), limits.max_items);
+                    digest.bash_activities.push(command.to_string());
                 }
             }
         }
         "WebSearch" => {
             if let Some(query) = input.get("query").and_then(JsonValue::as_str) {
-                push_capped(&mut digest.web_queries, query.to_string(), limits.max_items);
+                digest.web_queries.push(query.to_string());
             }
         }
         _ => {}
@@ -886,6 +928,8 @@ fn count_unknown_root_types(lines: &[String]) -> Vec<(String, u64)> {
 #[derive(Serialize)]
 struct SessionListEntry {
     id: String,
+    /// UTC, ISO 8601 (`--json` always reports UTC regardless of the human
+    /// display's local time)
     modified: Option<String>,
     size_bytes: u64,
     source: &'static str,
@@ -896,6 +940,7 @@ struct SessionListEntry {
     tool_operations: Vec<String>,
     bash_activities: Vec<String>,
     web_queries: Vec<String>,
+    harness_notifications_skipped: u64,
 }
 
 #[derive(Serialize)]
@@ -994,7 +1039,7 @@ fn list_sessions(
         println!("{}", format!("{}. {}", i + 1, session_id).bright_yellow());
 
         if let Some(mod_time) = modified {
-            print!("   {} | ", mod_time.format("%b %d %H:%M"));
+            print!("   {} | ", local_time(mod_time).format("%b %d %H:%M"));
         }
         print!("{} | ", format_size(*size));
         print!("[{}] | ", source.dimmed());
@@ -1002,25 +1047,24 @@ fn list_sessions(
 
         if !digest.agent_tasks.is_empty() {
             let tasks_preview: Vec<String> =
-                digest.agent_tasks.iter().map(|t| truncate(t, 60)).collect();
+                last_n(&digest.agent_tasks, 2).iter().map(|t| truncate(t, 60)).collect();
             println!("   📋 Tasks: {}", tasks_preview.join(" → ").dimmed());
         }
 
         if !digest.user_messages.is_empty() {
             let msg_preview: Vec<String> =
-                digest.user_messages.iter().take(2).map(|m| truncate(m, 50)).collect();
+                last_n(&digest.user_messages, 2).iter().map(|m| truncate(m, 50)).collect();
             println!("   💬 User: {}", msg_preview.join(" → ").dimmed());
         }
 
         if !digest.tool_operations.is_empty() {
             let tools_preview: Vec<String> =
-                digest.tool_operations.iter().take(5).map(|t| truncate(t, 80)).collect();
+                last_n(&digest.tool_operations, 5).iter().map(|t| truncate(t, 80)).collect();
             println!("   🔧 Tools: {}", tools_preview.join(", ").dimmed());
         }
 
         if !digest.bash_activities.is_empty() {
-            let bash_preview: Vec<String> = digest
-                .bash_activities
+            let bash_preview: Vec<String> = last_n(&digest.bash_activities, 3)
                 .iter()
                 .map(|cmd| truncate(cmd.lines().next().unwrap_or(cmd).trim(), 100))
                 .collect();
@@ -1028,7 +1072,7 @@ fn list_sessions(
         }
 
         if !digest.web_queries.is_empty() {
-            println!("   🔍 Search: {}", digest.web_queries.join(", ").dimmed());
+            println!("   🔍 Search: {}", last_n(&digest.web_queries, 3).join(", ").dimmed());
         }
 
         println!();
@@ -1101,6 +1145,7 @@ fn build_list_entry(
         tool_operations: digest.tool_operations,
         bash_activities: digest.bash_activities,
         web_queries: digest.web_queries,
+        harness_notifications_skipped: digest.harness_notifications_skipped,
     })
 }
 
@@ -1127,6 +1172,7 @@ struct SessionLoadReport {
     git_branch: Option<String>,
     commit_hints: Vec<String>,
     truncated: bool,
+    harness_notifications_skipped: u64,
 }
 
 fn load_session_context(path: &Path, json: bool, debug: bool) -> Result<()> {
@@ -1175,6 +1221,7 @@ fn load_session_context(path: &Path, json: bool, debug: bool) -> Result<()> {
             git_branch: digest.git_branch,
             commit_hints: digest.commit_hints,
             truncated: digest.truncated,
+            harness_notifications_skipped: digest.harness_notifications_skipped,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -1185,11 +1232,19 @@ fn load_session_context(path: &Path, json: bool, debug: bool) -> Result<()> {
     println!("{}", "═══════════════════════════════════════".bright_cyan());
 
     if let Some(mod_time) = modified {
-        println!("{} {}", "Date:".bold(), mod_time.format("%Y-%m-%d %H:%M:%S"));
+        println!("{} {}", "Date:".bold(), local_time(&mod_time).format("%Y-%m-%d %H:%M:%S %z"));
     }
 
     println!("{} {}", "Size:".bold(), format_size(size_bytes));
     println!("{} {}", "Topic:".bold(), digest.topic.bright_green());
+
+    if digest.harness_notifications_skipped > 0 {
+        println!(
+            "{} {}",
+            "Harness notifications skipped:".bold(),
+            digest.harness_notifications_skipped
+        );
+    }
 
     if !digest.agent_tasks.is_empty() {
         println!(
@@ -1206,7 +1261,7 @@ fn load_session_context(path: &Path, json: bool, debug: bool) -> Result<()> {
             "User Messages".bold(),
             format!("({} messages)", digest.user_messages.len()).dimmed()
         );
-        print_numbered(&digest.user_messages, 10, 150);
+        print_numbered_tail_verbatim(&digest.user_messages, 10, 150, 3, 4000);
     }
 
     if !digest.assistant_texts.is_empty() {
@@ -1215,7 +1270,7 @@ fn load_session_context(path: &Path, json: bool, debug: bool) -> Result<()> {
             "Assistant Texts".bold(),
             format!("({} texts)", digest.assistant_texts.len()).dimmed()
         );
-        print_numbered(&digest.assistant_texts, 10, 200);
+        print_numbered_tail_verbatim(&digest.assistant_texts, 10, 200, 3, 4000);
     }
 
     if !digest.tool_operations.is_empty() {
@@ -1306,9 +1361,58 @@ fn print_numbered(items: &[String], limit: usize, max_chars: usize) {
     }
 }
 
+/// Print up to `limit` of the most recent `items`, with the last `full_tail`
+/// entries shown in full (single-line collapsed for the rest, up to
+/// `short_max_chars`) — bounded at `full_max_chars` with an explicit
+/// "[truncated N chars]" marker rather than a silent `...`. Verbatim means
+/// verbatim: the newest turns are worth reading in full, not guessing at
+/// from a 150-character snippet.
+fn print_numbered_tail_verbatim(
+    items: &[String],
+    limit: usize,
+    short_max_chars: usize,
+    full_tail: usize,
+    full_max_chars: usize,
+) {
+    let shown = last_n(items, limit);
+    let hidden = items.len() - shown.len();
+    let full_start = shown.len().saturating_sub(full_tail);
+
+    for (i, item) in shown.iter().enumerate() {
+        let index = hidden + i + 1;
+        if i >= full_start {
+            let (text, cut) = truncate_reporting(item, full_max_chars);
+            println!("  {index}. {}", text.bright_white());
+            if let Some(cut) = cut {
+                println!("     {}", format!("[truncated {cut} chars]").dimmed());
+            }
+        } else {
+            let first_line = item.lines().next().unwrap_or(item);
+            println!("  {index}. {}", truncate(first_line, short_max_chars).bright_white());
+        }
+    }
+    if hidden > 0 {
+        println!("  {} ({hidden} earlier, not shown)", "...".dimmed());
+    }
+}
+
 // ============================================================================
 // Formatting helpers
 // ============================================================================
+
+/// Slice out the last `n` elements of `items`, preserving order (oldest of
+/// the kept set first, newest last).
+fn last_n<T>(items: &[T], n: usize) -> &[T] {
+    let start = items.len().saturating_sub(n);
+    &items[start..]
+}
+
+/// Convert a stored UTC timestamp to local time for human display. `--json`
+/// output keeps the UTC `DateTime` untouched (via `to_rfc3339`) — this
+/// conversion is display-only.
+fn local_time(utc: &DateTime<Utc>) -> DateTime<Local> {
+    utc.with_timezone(&Local)
+}
 
 /// Shorten path for display
 fn shorten_path(path: &str) -> String {
@@ -1331,6 +1435,21 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Truncate `text` to at most `max_bytes`, UTF-8 safe. Returns the
+/// (possibly-truncated) text and, if truncation happened, how many bytes
+/// were cut — used to print an explicit "[truncated N chars]" marker instead
+/// of a silent `...`.
+fn truncate_reporting(text: &str, max_bytes: usize) -> (String, Option<usize>) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), None);
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    (text[..boundary].to_string(), Some(text.len() - boundary))
 }
 
 /// Format file size in human-readable format
@@ -1830,6 +1949,152 @@ mod tests {
             vec![
                 ("some-future-event".to_string(), 2),
                 ("another-future-event".to_string(), 1),
+            ]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Round 2: harness-notification filtering, tail-not-head capping,
+    // slash-command rendering, and local-time display.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn last_n_returns_the_tail_slice() {
+        let items: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(last_n(&items, 2), ["c".to_string(), "d".to_string()]);
+        assert_eq!(last_n(&items, 10), items.as_slice());
+        assert_eq!(last_n(&items, 0), Vec::<String>::new().as_slice());
+    }
+
+    #[test]
+    fn truncate_to_last_keeps_the_tail_not_the_head() {
+        // This is the exact bug reported live: a front-biased cap kept the
+        // earliest N messages of a long window, so `list`'s preview showed
+        // two near-duplicate early prompts and never the session's actual
+        // latest activity.
+        let mut items: Vec<String> = (0..7).map(|i| i.to_string()).collect();
+        truncate_to_last(&mut items, 3);
+        assert_eq!(items, vec!["4".to_string(), "5".to_string(), "6".to_string()]);
+    }
+
+    #[test]
+    fn truncate_to_last_is_a_no_op_under_the_cap() {
+        let mut items = vec!["a".to_string(), "b".to_string()];
+        truncate_to_last(&mut items, 5);
+        assert_eq!(items, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn truncate_reporting_marks_cut_length() {
+        let (text, cut) = truncate_reporting("hello world", 5);
+        assert_eq!(text, "hello");
+        assert_eq!(cut, Some(6));
+
+        let (text, cut) = truncate_reporting("hi", 5);
+        assert_eq!(text, "hi");
+        assert_eq!(cut, None);
+    }
+
+    #[test]
+    fn render_slash_command_formats_name_and_args() {
+        assert_eq!(render_slash_command("/model", "placeholder-model"), "/model placeholder-model");
+        assert_eq!(render_slash_command("/compact", ""), "/compact");
+        assert_eq!(render_slash_command("/compact", "   "), "/compact");
+    }
+
+    #[test]
+    fn local_time_preserves_the_instant() {
+        let utc = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let local = local_time(&utc);
+        assert_eq!(local.timestamp(), utc.timestamp());
+    }
+
+    #[test]
+    fn build_digest_excludes_harness_notifications_and_renders_slash_commands() {
+        let home = TestHome::new();
+        // Real shapes, content redacted to placeholders: a genuine prompt, a
+        // task-notification (by origin.kind), a compact-summary turn (by
+        // isCompactSummary), a peer/cross-session message (by origin.kind),
+        // a local-command-stdout echo, and two slash commands (with and
+        // without arguments).
+        let lines = [
+            r#"{"type":"custom-title","customTitle":"placeholder session title","sessionId":"s"}"#.to_string(),
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"s","timestamp":"2024-01-01T00:00:00Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"placeholder genuine prompt"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u2","parentUuid":"u1","sessionId":"s","timestamp":"2024-01-01T00:00:01Z","isSidechain":false,"userType":"external","origin":{"kind":"task-notification"},"cwd":"/work","message":{"role":"user","content":"placeholder task result, not a real prompt"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u3","parentUuid":"u2","sessionId":"s","timestamp":"2024-01-01T00:00:02Z","isSidechain":false,"userType":"external","isCompactSummary":true,"cwd":"/work","message":{"role":"user","content":"This session is being continued from a previous conversation: placeholder summary"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u4","parentUuid":"u3","sessionId":"s","timestamp":"2024-01-01T00:00:03Z","isSidechain":false,"userType":"external","isMeta":true,"origin":{"kind":"peer"},"cwd":"/work","message":{"role":"user","content":"Another Claude session sent a message: placeholder"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u5","parentUuid":"u4","sessionId":"s","timestamp":"2024-01-01T00:00:04Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"<local-command-stdout>Set model to placeholder</local-command-stdout>"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u6","parentUuid":"u5","sessionId":"s","timestamp":"2024-01-01T00:00:05Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>placeholder-model</command-args>"}}"#.to_string(),
+            r#"{"type":"user","uuid":"u7","parentUuid":"u6","sessionId":"s","timestamp":"2024-01-01T00:00:06Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"}}"#.to_string(),
+        ];
+        let path = home.session_with_content(
+            "projects/project-a",
+            "44444444-4444-4444-8444-444444444444",
+            &lines.join("\n"),
+        );
+
+        let digest = build_digest(&path, &load_limits(false)).expect("build digest");
+        assert_eq!(
+            digest.user_messages,
+            vec![
+                "placeholder genuine prompt".to_string(),
+                "/model placeholder-model".to_string(),
+                "/compact".to_string(),
+            ]
+        );
+        assert_eq!(digest.harness_notifications_skipped, 4);
+    }
+
+    #[test]
+    fn build_digest_keeps_the_latest_messages_when_the_window_exceeds_the_cap() {
+        // Reproduces the reported bug end to end: three near-duplicate early
+        // prompts, an excluded task notification, then two later distinct
+        // prompts. `LIST_LIMITS` caps at 5 real messages; the two most
+        // recent (not the three earliest) must survive.
+        let home = TestHome::new();
+        let mut lines = vec![
+            r#"{"type":"custom-title","customTitle":"placeholder title","sessionId":"s"}"#.to_string(),
+        ];
+        for (i, text) in [
+            "placeholder repeated request",
+            "placeholder repeated request",
+            "placeholder repeated request",
+        ]
+        .iter()
+        .enumerate()
+        {
+            lines.push(format!(
+                r#"{{"type":"user","uuid":"u{i}","parentUuid":null,"sessionId":"s","timestamp":"2024-01-01T00:00:0{i}Z","isSidechain":false,"userType":"external","cwd":"/work","message":{{"role":"user","content":"{text}"}}}}"#
+            ));
+        }
+        lines.push(r#"{"type":"user","uuid":"u-notif","parentUuid":null,"sessionId":"s","timestamp":"2024-01-01T00:00:04Z","isSidechain":false,"userType":"external","origin":{"kind":"task-notification"},"cwd":"/work","message":{"role":"user","content":"placeholder notification"}}"#.to_string());
+        lines.push(r#"{"type":"user","uuid":"u-later","parentUuid":null,"sessionId":"s","timestamp":"2024-01-01T00:00:05Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"placeholder later question"}}"#.to_string());
+        lines.push(r#"{"type":"user","uuid":"u-final","parentUuid":null,"sessionId":"s","timestamp":"2024-01-01T00:00:06Z","isSidechain":false,"userType":"external","cwd":"/work","message":{"role":"user","content":"placeholder final instruction"}}"#.to_string());
+
+        let path = home.session_with_content(
+            "projects/project-a",
+            "55555555-5555-4555-8555-555555555555",
+            &lines.join("\n"),
+        );
+
+        let digest = build_digest(&path, &LIST_LIMITS).expect("build digest");
+        assert_eq!(digest.harness_notifications_skipped, 1);
+        assert_eq!(
+            digest.user_messages,
+            vec![
+                "placeholder repeated request".to_string(),
+                "placeholder repeated request".to_string(),
+                "placeholder repeated request".to_string(),
+                "placeholder later question".to_string(),
+                "placeholder final instruction".to_string(),
+            ]
+        );
+        // The list preview shows the *last* two, not the first two.
+        assert_eq!(
+            last_n(&digest.user_messages, 2),
+            [
+                "placeholder later question".to_string(),
+                "placeholder final instruction".to_string(),
             ]
         );
     }

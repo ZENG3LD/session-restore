@@ -363,6 +363,20 @@ impl SessionEvent {
     }
 }
 
+/// Origin of a `user` turn.
+///
+/// Real `kind` values seen on disk: `"human"` (a genuine human-typed
+/// prompt), `"task-notification"` (a delegated agent's completion notice
+/// routed back as a `user` turn), and `"peer"` (a message from another
+/// Claude session, e.g. a cross-session hand-back). Other fields vary by
+/// `kind` and are not modeled — only `kind` is needed to exclude
+/// harness-generated turns from a restore digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OriginInfo {
+    /// Origin kind, e.g. `"human"`, `"task-notification"`, `"peer"`
+    pub kind: String,
+}
+
 /// User message event
 ///
 /// Represents messages from:
@@ -385,6 +399,19 @@ pub struct UserEvent {
     /// harness-generated notices rather than something the human actually typed.
     #[serde(rename = "isMeta")]
     pub is_meta: Option<bool>,
+
+    /// Marks a synthesized conversation-compaction summary turn (the text
+    /// Claude Code writes back as a `user` turn to replay a compacted
+    /// conversation) rather than something the human actually typed.
+    #[serde(rename = "isCompactSummary")]
+    pub is_compact_summary: Option<bool>,
+
+    /// Where this turn came from. Present on newer transcripts; absent on
+    /// older ones and on several harness-injected shapes that predate this
+    /// field, so its absence does not by itself mean "human" — only specific
+    /// present values (`"task-notification"`, `"peer"`) are used, as an
+    /// exclusion signal.
+    pub origin: Option<OriginInfo>,
 
     /// Tool result (if this is a tool result message)
     ///
@@ -472,41 +499,108 @@ impl UserEvent {
             .collect()
     }
 
-    /// Verbatim human-typed prompt text, or `None` if this turn carries no
-    /// genuine human-authored text.
+    /// Classify this turn's content for a restore digest.
     ///
-    /// Excludes, in order:
+    /// Excludes, as [`UserTurnKind::HarnessNotification`]:
     /// - non-external turns (tool results routed back as `user` events with
     ///   `userType` unset or `"internal"`)
-    /// - `isMeta` turns (harness-injected notices, e.g. local-command caveats)
-    /// - command-palette and system-reminder injections (`<command-name>`,
-    ///   `<local-command-caveat>`, `<command-message>`, `<system-reminder>`)
+    /// - `isMeta` turns (harness-injected notices)
+    /// - `isCompactSummary` turns (the synthesized replay of a compacted
+    ///   conversation, written back as a `user` turn — not human-authored)
+    /// - turns whose `origin.kind` is `"task-notification"` (a delegated
+    ///   agent's completion notice) or `"peer"` (a cross-session message)
     /// - turns whose content is only tool results (no text block at all —
-    ///   handled implicitly, since [`ContentBlock::as_text`] only matches text
-    ///   blocks)
+    ///   handled implicitly, since [`ContentBlock::as_text`] only matches
+    ///   text blocks)
+    /// - local-command echoes (`<local-command-caveat>`,
+    ///   `<local-command-stdout>`, `<local-command-stderr>`), stray
+    ///   `<task-notification>`/`<system-reminder>` text blocks not caught by
+    ///   the structural checks above
+    ///
+    /// Recognizes, as [`UserTurnKind::SlashCommand`]: a `<command-name>`
+    /// invocation — a real user action, not free text, but not a harness
+    /// notification either. The caller decides how to render it.
+    ///
+    /// Everything else is [`UserTurnKind::HumanPrompt`] — including
+    /// system-generated notices of a genuine user action, e.g.
+    /// `[Request interrupted by user]`, which reflect something the human
+    /// actually did even though the string wasn't typed character-by-character.
     #[must_use]
-    pub fn human_prompt_text(&self) -> Option<&str> {
+    pub fn classify_turn(&self) -> UserTurnKind<'_> {
         if self.metadata.user_type.as_deref() != Some("external") {
-            return None;
+            return UserTurnKind::HarnessNotification;
         }
         if self.is_meta == Some(true) {
-            return None;
+            return UserTurnKind::HarnessNotification;
+        }
+        if self.is_compact_summary == Some(true) {
+            return UserTurnKind::HarnessNotification;
+        }
+        if matches!(
+            self.origin.as_ref().map(|origin| origin.kind.as_str()),
+            Some("task-notification" | "peer")
+        ) {
+            return UserTurnKind::HarnessNotification;
         }
 
-        const INJECTION_PREFIXES: [&str; 4] = [
+        let Some(text) = self.message.content.iter().find_map(ContentBlock::as_text) else {
+            return UserTurnKind::HarnessNotification;
+        };
+        let trimmed = text.trim_start();
+
+        if trimmed.starts_with("<command-name>") {
+            if let (Some(name), Some(args)) =
+                (extract_tag(trimmed, "command-name"), extract_tag(trimmed, "command-args"))
+            {
+                return UserTurnKind::SlashCommand { name, args };
+            }
+        }
+
+        const NOTIFICATION_PREFIXES: [&str; 5] = [
             "<local-command-caveat>",
-            "<command-name>",
-            "<command-message>",
+            "<local-command-stdout>",
+            "<local-command-stderr>",
+            "<task-notification>",
             "<system-reminder>",
         ];
-
-        let text = self.message.content.iter().find_map(ContentBlock::as_text)?;
-        let trimmed = text.trim_start();
-        if INJECTION_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
-            return None;
+        if NOTIFICATION_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
+            return UserTurnKind::HarnessNotification;
         }
-        Some(text)
+
+        UserTurnKind::HumanPrompt(text)
     }
+}
+
+/// Classification of a `user` event's content for a restore digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserTurnKind<'a> {
+    /// Genuine human-authored prompt text, or a system-generated notice of a
+    /// real user action (e.g. an interruption marker).
+    HumanPrompt(&'a str),
+    /// A slash-command invocation, e.g. `/model` with argument
+    /// `claude-fable-5`, or `/compact` with no arguments. A real user
+    /// action, but not free text — the caller decides how to render it
+    /// (e.g. `"/model claude-fable-5"`).
+    SlashCommand {
+        /// Command name, including its leading slash (e.g. `"/model"`)
+        name: &'a str,
+        /// Raw argument text, possibly empty
+        args: &'a str,
+    },
+    /// A harness-generated notice with no human-authored content: a
+    /// non-external/tool-result turn, an `isMeta` or `isCompactSummary`
+    /// turn, a task-notification or peer/cross-session message, or a
+    /// local-command echo.
+    HarnessNotification,
+}
+
+/// Extract the text between `<tag>` and `</tag>` in `text`, if both are present.
+fn extract_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&close)?;
+    Some(&text[start..end])
 }
 
 /// Assistant message event
@@ -1105,34 +1199,118 @@ mod tests {
         let SessionEvent::User(user) = event else {
             panic!("expected user event");
         };
-        assert_eq!(
-            user.human_prompt_text(),
-            Some("placeholder prompt text")
-        );
+        assert_eq!(user.classify_turn(), UserTurnKind::HumanPrompt("placeholder prompt text"));
     }
 
     #[test]
-    fn test_human_prompt_text_skips_meta_turns() {
+    fn test_classify_turn_skips_meta_turns() {
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<local-command-caveat>Caveat: placeholder</local-command-caveat>"},"isMeta":true,"uuid":"user-uuid","timestamp":"2026-09-06T00:14:48.155Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.human_prompt_text(), None);
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
     }
 
     #[test]
-    fn test_human_prompt_text_skips_command_injection() {
-        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>placeholder</command-args>"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
+    fn test_classify_turn_recognizes_slash_command_with_args() {
+        // Real shape: `/model claude-fable-5`.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>placeholder-model</command-args>"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.human_prompt_text(), None);
+        assert_eq!(
+            user.classify_turn(),
+            UserTurnKind::SlashCommand { name: "/model", args: "placeholder-model" }
+        );
     }
 
     #[test]
-    fn test_human_prompt_text_skips_tool_result_only_turn() {
+    fn test_classify_turn_recognizes_slash_command_without_args() {
+        // Real shape: `/compact` with an empty `<command-args>` tag.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
+
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::SlashCommand { name: "/compact", args: "" });
+    }
+
+    #[test]
+    fn test_classify_turn_skips_local_command_stdout_and_stderr() {
+        for content in [
+            "<local-command-stdout>Set model to placeholder</local-command-stdout>",
+            "<local-command-stderr>placeholder error</local-command-stderr>",
+        ] {
+            let json = format!(
+                r#"{{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{{"role":"user","content":"{content}"}},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}}"#
+            );
+            let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(&json).unwrap() else {
+                panic!("expected user event");
+            };
+            assert_eq!(
+                user.classify_turn(),
+                UserTurnKind::HarnessNotification,
+                "must skip: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_turn_skips_task_notification_by_content_and_by_origin() {
+        // By content prefix alone (no origin field — defense in depth).
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>placeholder</task-id>\n<status>completed</status>\n</task-notification>"},"uuid":"user-uuid","timestamp":"2026-09-22T00:00:00.000Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+
+        // Real shape: `origin: {"kind": "task-notification"}`.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"placeholder result text, not a real prompt"},"uuid":"user-uuid","timestamp":"2026-09-22T00:00:00.000Z","userType":"external","origin":{"kind":"task-notification"},"cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+    }
+
+    #[test]
+    fn test_classify_turn_skips_peer_cross_session_message() {
+        // Real shape: `origin: {"kind": "peer", ...}`, isMeta true.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"placeholder\">placeholder body</cross-session-message>"},"isMeta":true,"origin":{"kind":"peer"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+    }
+
+    #[test]
+    fn test_classify_turn_skips_compact_summary() {
+        // Real shape: `isCompactSummary: true` — the synthesized replay text
+        // Claude Code writes back as a `user` turn after compaction. userType
+        // is "external" and isMeta is absent, so only the dedicated field
+        // catches this.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. Summary: placeholder"},"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"uuid":"user-uuid","timestamp":"2026-09-10T00:00:00.000Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+    }
+
+    #[test]
+    fn test_classify_turn_keeps_interruption_marker_as_human_prompt() {
+        // Real shape: an array-content turn holding only a text block that
+        // is a system-generated notice of a genuine user action (hitting
+        // Escape), not free text — still counts as human.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:27.169Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.classify_turn(), UserTurnKind::HumanPrompt("[Request interrupted by user]"));
+    }
+
+    #[test]
+    fn test_classify_turn_skips_tool_result_only_turn() {
         // Real shape: a user turn whose content array holds only a
         // tool_result block (a system-reminder response), no text block.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":[{"tool_use_id":"tool-use-id","type":"tool_result","content":"<system-reminder>placeholder warning</system-reminder>"}]},"uuid":"user-uuid","timestamp":"2026-08-30T23:51:17.045Z","toolUseResult":{"type":"text","file":{"filePath":"C:\\work\\out.txt","content":"","numLines":1,"startLine":1,"totalLines":1}},"sourceToolAssistantUUID":"assistant-uuid","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
@@ -1142,18 +1320,18 @@ mod tests {
         let SessionEvent::User(user) = event else {
             panic!("expected user event");
         };
-        assert_eq!(user.human_prompt_text(), None);
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
         assert!(user.tool_use_result.is_none());
     }
 
     #[test]
-    fn test_human_prompt_text_skips_internal_user_type() {
+    fn test_classify_turn_skips_internal_user_type() {
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"placeholder"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"internal","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.human_prompt_text(), None);
+        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
     }
 
     use crate::events::attachment::AttachmentType;

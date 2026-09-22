@@ -182,8 +182,8 @@ pub use progress::{ProgressData, ProgressEvent};
 pub use root::{
     AgentNameEvent, AiTitleEvent, AssistantMessage, AtisLatchEvent, BridgeSessionEvent,
     CacheCreation, CustomTitleEvent, FileHistoryDeltaEvent, FileHistorySnapshot, LastPromptEvent,
-    ModeEvent, PermissionModeEvent, QueueOperation, RootAttachmentEvent, SessionEvent,
-    SessionSummary, Snapshot, TokenUsage,
+    ModeEvent, OriginInfo, PermissionModeEvent, QueueOperation, RootAttachmentEvent, SessionEvent,
+    SessionSummary, Snapshot, TokenUsage, UserTurnKind,
 };
 pub use system::{CompactMetadata, SystemEvent};
 pub use tool_result::ToolUseResult;
