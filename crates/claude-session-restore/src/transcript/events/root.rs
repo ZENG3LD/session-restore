@@ -1452,7 +1452,7 @@ mod tests {
         // Real shapes (v2.1.28x): enqueue carries `content`, a `remove` that
         // absorbed the message mid-turn also carries `reason`.
         let enqueue: SessionEvent = serde_json::from_str(
-            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:09:10.816Z","sessionId":"session-123","content":"placeholder queued text"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:10.816Z","sessionId":"session-123","content":"placeholder queued text"}"#,
         )
         .unwrap();
         let SessionEvent::QueueOperation(op) = enqueue else {
@@ -1475,7 +1475,7 @@ mod tests {
     #[test]
     fn test_queue_operation_incoming_kind_excludes_task_notifications_and_peer() {
         let notification: SessionEvent = serde_json::from_str(
-            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123","content":"<task-notification>\n<task-id>placeholder</task-id>\n<status>completed</status>\n</task-notification>"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:07.727Z","sessionId":"session-123","content":"<task-notification>\n<task-id>placeholder</task-id>\n<status>completed</status>\n</task-notification>"}"#,
         )
         .unwrap();
         let SessionEvent::QueueOperation(op) = notification else {
@@ -1484,7 +1484,7 @@ mod tests {
         assert!(matches!(op.incoming_kind(), Some(IncomingKind::TaskNotification(_))));
 
         let missing_content: SessionEvent = serde_json::from_str(
-            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:07.727Z","sessionId":"session-123"}"#,
         )
         .unwrap();
         let SessionEvent::QueueOperation(op) = missing_content else {
@@ -1493,7 +1493,7 @@ mod tests {
         assert_eq!(op.incoming_kind(), None);
 
         let peer: SessionEvent = serde_json::from_str(
-            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123","content":"<cross-session-message from=\"placeholder\">placeholder body</cross-session-message>"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:07.727Z","sessionId":"session-123","content":"<cross-session-message from=\"placeholder\">placeholder body</cross-session-message>"}"#,
         )
         .unwrap();
         let SessionEvent::QueueOperation(op) = peer else {

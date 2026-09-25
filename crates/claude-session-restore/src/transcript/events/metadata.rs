@@ -42,7 +42,7 @@ pub struct EventMetadata {
     /// Session identifier (groups related events)
     ///
     /// All events in a session file share the same `session_id`.
-    /// Format: `{uuid}` (e.g., "7b1f4d79-4ab1-4d12-913d-e367cb3a5387")
+    /// Format: `{uuid}` (e.g., "01234567-89ab-4cde-8f01-23456789abcd")
     #[serde(rename = "sessionId")]
     pub session_id: String,
 

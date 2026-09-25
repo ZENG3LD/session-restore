@@ -248,7 +248,7 @@ pub enum AttachmentType {
     ///   "source_uuid": "...",
     ///   "commandMode": "prompt",
     ///   "origin": {"kind": "human"},
-    ///   "timestamp": "2026-09-24T23:09:10.816Z",
+    ///   "timestamp": "2026-01-01T00:00:10.816Z",
     ///   "humanTurn": true
     /// }
     /// ```
@@ -261,7 +261,7 @@ pub enum AttachmentType {
     ///   "prompt": "<task-notification>...</task-notification>",
     ///   "source_uuid": "...",
     ///   "commandMode": "task-notification",
-    ///   "timestamp": "2026-09-24T23:06:27.726Z"
+    ///   "timestamp": "2026-01-01T00:00:07.726Z"
     /// }
     /// ```
     QueuedCommand(QueuedCommand),
@@ -625,10 +625,10 @@ mod tests {
         let json = r#"{
             "type": "queued_command",
             "prompt": "placeholder mid-turn message",
-            "source_uuid": "e1419965-e964-4e33-ac96-885ca7b816d4",
+            "source_uuid": "0f0f0f0f-0000-4000-8000-000000000001",
             "commandMode": "prompt",
             "origin": {"kind": "human"},
-            "timestamp": "2026-09-24T23:09:10.816Z",
+            "timestamp": "2026-01-01T00:00:10.816Z",
             "humanTurn": true
         }"#;
 
@@ -649,9 +649,9 @@ mod tests {
         let json = r#"{
             "type": "queued_command",
             "prompt": "<task-notification>\n<task-id>placeholder</task-id>\n</task-notification>",
-            "source_uuid": "942c613e-72b4-45b6-a9fe-fe2d7108396e",
+            "source_uuid": "0f0f0f0f-0000-4000-8000-000000000002",
             "commandMode": "task-notification",
-            "timestamp": "2026-09-24T23:06:27.726Z"
+            "timestamp": "2026-01-01T00:00:07.726Z"
         }"#;
 
         let attachment: AttachmentType = serde_json::from_str(json).unwrap();

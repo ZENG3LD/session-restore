@@ -128,14 +128,14 @@ mod tests {
     fn finds_a_commit_confirmed_by_git_commits_own_output() {
         let events = vec![
             event(0, r#"{"type":"assistant","uuid":"a1","parentUuid":null,"sessionId":"s","timestamp":"2026-01-01T00:00:00Z","isSidechain":false,"cwd":"/work","message":{"model":"claude-test","id":"m1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git -C /work/session-restore commit -m 'fix: repair parser'","description":"commit"}}]}}"#),
-            event(200, r#"{"type":"user","uuid":"u1","parentUuid":"a1","sessionId":"s","timestamp":"2026-01-01T00:00:01Z","isSidechain":false,"userType":"internal","cwd":"/work","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"[zengeld-chart abc1234] fix: repair parser\n 2 files changed, 10 insertions(+)"}]}}"#),
+            event(200, r#"{"type":"user","uuid":"u1","parentUuid":"a1","sessionId":"s","timestamp":"2026-01-01T00:00:01Z","isSidechain":false,"userType":"internal","cwd":"/work","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"[main abc1234] fix: repair parser\n 2 files changed, 10 insertions(+)"}]}}"#),
         ];
 
         let commits = scan(&events, Some("/work"));
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].offset, 0);
         assert_eq!(commits[0].repo.as_deref(), Some("/work/session-restore"));
-        assert_eq!(commits[0].branch, "zengeld-chart");
+        assert_eq!(commits[0].branch, "main");
         assert_eq!(commits[0].hash, "abc1234");
         assert_eq!(commits[0].subject, "fix: repair parser");
     }

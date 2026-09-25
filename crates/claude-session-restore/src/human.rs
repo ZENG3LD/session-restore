@@ -294,7 +294,7 @@ mod tests {
     fn human_messages_merges_turn_and_mid_turn_in_file_order_with_offsets() {
         let events = vec![
             event(0, r#"{"type":"user","uuid":"u1","sessionId":"s","timestamp":"2026-09-24T23:00:00Z","isSidechain":false,"userType":"external","origin":{"kind":"human"},"cwd":"/work","message":{"role":"user","content":"placeholder normal prompt"}}"#),
-            event(200, r#"{"parentUuid":null,"isSidechain":false,"attachment":{"type":"queued_command","prompt":"placeholder mid-turn message","source_uuid":"su","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-09-24T23:09:10.816Z","humanTurn":true},"type":"attachment","uuid":"att1","timestamp":"2026-09-24T23:09:10.816Z","userType":"external","cwd":"/work","sessionId":"s"}"#),
+            event(200, r#"{"parentUuid":null,"isSidechain":false,"attachment":{"type":"queued_command","prompt":"placeholder mid-turn message","source_uuid":"su","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:10.816Z","humanTurn":true},"type":"attachment","uuid":"att1","timestamp":"2026-01-01T00:00:10.816Z","userType":"external","cwd":"/work","sessionId":"s"}"#),
             event(400, r#"{"parentUuid":null,"isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>t</task-id>\n</task-notification>","source_uuid":"su2","commandMode":"task-notification","timestamp":"2026-09-24T23:10:00Z"},"type":"attachment","uuid":"att2","timestamp":"2026-09-24T23:10:00Z","userType":"external","cwd":"/work","sessionId":"s"}"#),
         ];
 

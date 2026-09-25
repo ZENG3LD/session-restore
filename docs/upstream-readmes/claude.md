@@ -90,21 +90,21 @@ $ claude-session-restore list
 
 Recent Sessions:
 
-1. 8f59d651-cada-4484-9153-5cc577137486
+1. aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
    Jan 26 04:33 | 32.42 MB | [projects] | Agent tasks
    📋 Tasks: Fix the dropdown z-order problem... → Fix the dropdown...
-   💬 User: дропдауны либо с 0 опасити... → закомить работу...
+   💬 User: the dropdown renders behind the modal... → commit the fix...
    🔧 Tools: Bash, Bash, Bash, Write
 
-2. 4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0
+2. bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
    Jan 26 05:47 | 103.69 MB | [projects] | Agent tasks
-   📋 Tasks: Implement MOEX ISS API connector...
-   💬 User: <ide_opened_file>... → да, какие проблемы выявлены...
+   📋 Tasks: Implement a market-data API connector...
+   💬 User: add the market-data connector... → what issues did you find...
    🔧 Tools: Bash, Bash, Task, Task
 
 To load a session, use:
-  1. claude-session-restore load "C:\Users\...\8f59d651-cada-4484-9153-5cc577137486.jsonl"
-  2. claude-session-restore load "C:\Users\...\4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0.jsonl"
+  1. claude-session-restore load "C:\Users\...\aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+  2. claude-session-restore load "C:\Users\...\bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"
 ```
 
 **Load full context:**
@@ -112,20 +112,20 @@ To load a session, use:
 $ claude-session-restore load "path/to/session.jsonl"
 
 ═══════════════════════════════════════
-Session: 8f59d651-cada-4484-9153-5cc577137486
+Session: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 ═══════════════════════════════════════
 Date: 2026-01-26 04:33:18
 Size: 32.42 MB
 Topic: Agent tasks
 
 Agent Tasks 📋 (126 tasks)
-  1. СРОЧНО! Dropdown перекрывается другими элементами...
+  1. Dropdown is covered by other elements...
   2. Fix dropdown z-order problem in Chart Settings modal
   ...
 
 User Messages 💬 (2 messages)
-  1. закомить работу в ваших крейтах
-  2. итого подведи итог что мы сделали...
+  1. commit the work in the crates you touched
+  2. summarize what we did...
 
 Tool Operations 🔧 (7 operations)
   1. Task
@@ -133,11 +133,11 @@ Tool Operations 🔧 (7 operations)
   ...
 
 Files Modified 📁 (17 files)
-  1. zengeld-terminal/ui/chart_settings.rs
-  2. zengeld-terminal/ui/dropdown.rs
+  1. app/ui/chart_settings.rs
+  2. app/ui/dropdown.rs
   ...
 
-Git Branch: zengeld-chart
+Git Branch: main
 ```
 
 ### Claude Code Skill

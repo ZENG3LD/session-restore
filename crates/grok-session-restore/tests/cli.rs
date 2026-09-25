@@ -117,12 +117,12 @@ fn verbatim_digest_surfaces_assistant_text_tool_args_and_errors_in_order() {
         "last_turn_summary": "STALE PARAPHRASE: should never be the digest"
     });
     let chat = concat!(
-        r#"{"type":"user","content":"проверь прогресс","prompt_index":0}"#, "\n",
+        r#"{"type":"user","content":"как там задача?","prompt_index":0}"#, "\n",
     );
     let updates = concat!(
         r#"{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"run_terminal_command","rawInput":{"command":"Get-CimInstance Win32_Process"}}}}"#, "\n",
         r#"{"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"tc1","status":"completed"}}}"#, "\n",
-        r#"{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Идёт. RDAP 8720/14207 (~61%), DNS готов."}}}}"#, "\n",
+        r#"{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Идёт. Шаг 3 из 7 (~43%), сборка готова."}}}}"#, "\n",
         r#"{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"tc2","title":"read_file","rawInput":{"file_path":"C:/data/harvest.log"}}}}"#, "\n",
         r#"{"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"tc2","status":"failed","content":[{"type":"content","content":{"type":"text","text":"Cannot read binary file: harvest.log"}}]}}}"#, "\n",
     );
@@ -133,7 +133,7 @@ fn verbatim_digest_surfaces_assistant_text_tool_args_and_errors_in_order() {
     let stdout = String::from_utf8_lossy(&human.stdout);
 
     // Verbatim assistant text, in Cyrillic, never paraphrased.
-    assert!(stdout.contains("Идёт. RDAP 8720/14207 (~61%), DNS готов."));
+    assert!(stdout.contains("Идёт. Шаг 3 из 7 (~43%), сборка готова."));
     // Verbatim tool call argument (the actual command, not just a name/count).
     assert!(stdout.contains("run_terminal_command: Get-CimInstance Win32_Process"));
     // Verbatim tool failure text.
@@ -161,7 +161,7 @@ fn verbatim_digest_surfaces_assistant_text_tool_args_and_errors_in_order() {
     assert!(report["assistant_texts"][0]
         .as_str()
         .expect("assistant text")
-        .contains("RDAP 8720/14207"));
+        .contains("Шаг 3 из 7"));
     assert_eq!(report["tool_operations_total"], 3); // 2 calls + 1 failed update
     assert_eq!(report["errors_total"], 1);
     assert!(report["errors"][0].as_str().expect("error text").contains("Cannot read binary file"));
