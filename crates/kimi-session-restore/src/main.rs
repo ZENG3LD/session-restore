@@ -91,6 +91,10 @@ fn main() {
         print_help();
         return;
     }
+    if args[0] == "--version" || args[0] == "-V" {
+        println!("kimi-session-restore {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     match args[0].as_str() {
         "list" => cmd_list(&args[1..]),
         "load" => cmd_load(&args[1..]),

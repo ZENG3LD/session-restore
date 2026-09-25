@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 
 # Profiles are only honoured at the workspace root, so the per-crate
 # `[profile.release]` blocks the four CLIs used to carry live here.

@@ -58,7 +58,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "claude-session-restore")]
+#[command(name = "claude-session-restore", version)]
 #[command(about = "Restore bounded context from Claude Code session transcripts", long_about = None)]
 struct Cli {
     #[command(subcommand)]

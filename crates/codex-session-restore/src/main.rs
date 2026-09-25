@@ -23,6 +23,10 @@ fn run(args: Vec<OsString>) -> Result<(), RestoreError> {
             print_usage();
             Ok(())
         }
+        "--version" | "-V" => {
+            println!("codex-session-restore {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
