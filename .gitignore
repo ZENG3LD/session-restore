@@ -20,8 +20,10 @@ env/
 data/
 
 # Agent artifacts (internal, not public)
+# Anchored: a bare `CLAUDE.md` also matches docs/upstream-readmes/claude.md
+# under Windows' case-insensitive git.
+/CLAUDE.md
 docs/research/
-CLAUDE.md
 .nemo-service.toml
 .claude/
 

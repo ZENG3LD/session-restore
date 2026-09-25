@@ -73,7 +73,7 @@
 //! ## Parsing Root Events
 //!
 //! ```rust
-//! use claude_session_types::events::{SessionEvent, ProgressData};
+//! use claude_session_restore::transcript::events::{SessionEvent, ProgressData};
 //!
 //! let line = r#"{"type": "user", "uuid": "test-uuid", "sessionId": "session-1", "timestamp": "2024-01-01T00:00:00Z", "isSidechain": false, "message": {"role": "user", "content": "hello"}}"#;
 //! let event: SessionEvent = serde_json::from_str(line)?;
@@ -105,7 +105,7 @@
 //! ## Accessing Nested Content
 //!
 //! ```rust
-//! use claude_session_types::events::{SessionEvent, ContentBlock, ToolUseResult};
+//! use claude_session_restore::transcript::events::{SessionEvent, ContentBlock, ToolUseResult};
 //!
 //! # let event: SessionEvent = serde_json::from_str(r#"{"type": "user", "uuid": "test", "timestamp": "2024-01-01T00:00:00Z", "sessionId": "test", "parentUuid": null, "isSidechain": false, "cwd": "/test", "message": {"role": "user", "content": []}}"#)?;
 //! if let SessionEvent::User(user) = event {
@@ -140,8 +140,8 @@
 //! `.data.normalized_messages[]`, which recursively contains all event types:
 //!
 //! ```rust
-//! use claude_session_types::events::SessionEvent;
-//! use claude_session_types::events::progress::NormalizedMessage;
+//! use claude_session_restore::transcript::events::SessionEvent;
+//! use claude_session_restore::transcript::events::progress::NormalizedMessage;
 //!
 //! # let event: SessionEvent = serde_json::from_str(r#"{"type": "progress", "uuid": "test", "timestamp": "2024-01-01T00:00:00Z", "sessionId": "test", "parentUuid": null, "isSidechain": false, "cwd": "/test", "data": {"type": "bash_progress", "output": "", "fullOutput": "", "elapsedTimeSeconds": 0, "totalLines": 0, "message": {}, "normalizedMessages": []}}"#)?;
 //! if let SessionEvent::Progress(progress) = event {
@@ -167,6 +167,7 @@
 //! ```
 
 pub mod attachment;
+pub mod incoming;
 pub mod message;
 pub mod metadata;
 pub mod progress;
@@ -176,6 +177,7 @@ pub mod tool_result;
 
 // Re-export main types for convenience
 pub use attachment::{AttachmentBlock, AttachmentType};
+pub use incoming::{render_owner_command, strip_system_reminder_blocks, unwrap_pasted_content, IncomingKind};
 pub use message::{ContentBlock, MessageContent};
 pub use metadata::EventMetadata;
 pub use progress::{ProgressData, ProgressEvent};
@@ -183,7 +185,7 @@ pub use root::{
     AgentNameEvent, AiTitleEvent, AssistantMessage, AtisLatchEvent, BridgeSessionEvent,
     CacheCreation, CustomTitleEvent, FileHistoryDeltaEvent, FileHistorySnapshot, LastPromptEvent,
     ModeEvent, OriginInfo, PermissionModeEvent, QueueOperation, RootAttachmentEvent, SessionEvent,
-    SessionSummary, Snapshot, TokenUsage, UserTurnKind,
+    SessionSummary, Snapshot, TokenUsage,
 };
 pub use system::{CompactMetadata, SystemEvent};
 pub use tool_result::ToolUseResult;

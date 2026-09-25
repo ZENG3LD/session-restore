@@ -7,7 +7,7 @@ reads its own harness's transcript storage from disk. None of them is a native
 
 | Harness | Binary | Reads |
 | --- | --- | --- |
-| Claude Code | `session-summary` | `~/.claude/projects/**/<uuid>.jsonl` |
+| Claude Code | `claude-session-restore` | `~/.claude/projects/**/<uuid>.jsonl` |
 | Grok CLI | `grok-session-restore` | `~/.grok/sessions/<cwd-key>/<id>/` |
 | Kimi Code | `kimi-session-restore` | `~/.kimi-code/sessions/<cwd-key>/<id>/agents/*/wire.jsonl` |
 | Codex | `codex-session-restore` | `~/.codex/sessions/**` rollout files |
@@ -29,8 +29,7 @@ parser matches the source harness, not its own. One workspace means one
 
 ```
 crates/
-  claude-session-types/      event types for Claude transcript parsing
-  claude-session-restore/    package `session-summary`, binary `session-summary`
+  claude-session-restore/    binary + library; `transcript` is the Claude JSONL record model
   grok-session-restore/
   kimi-session-restore/
   codex-session-restore/     binary + library; the library is the most general
@@ -68,7 +67,7 @@ two skills cannot share one name in one home.
 | codex | `codex-restore-session` | `codex-restore-session` | `codex-restore-session` | `codex-restore-session` |
 
 Native installs are copied verbatim. Only the foreign copies have their
-frontmatter `name:` retargeted, and that matters: gate4agent's live end-to-end
+frontmatter `name:` retargeted, and that matters: hatchery's live end-to-end
 test asserts the installed Claude and Codex skills are byte-identical to their
 canonical sources.
 
@@ -82,9 +81,22 @@ order — never an agent-written summary; provider-authored compaction summaries
 are hidden from the digest and shown, clearly labelled, only under
 `--full-summary` (Grok, Kimi) where the store carries them.
 
+**Claude only — two waves.** `claude-session-restore load` prints a bounded
+(~180-line) digest where every item carries an `@o<byte-offset>` handle —
+stable because transcripts are append-only. Six wave-2 commands take a
+handle or id from that digest and print the full verbatim material: `show`
+(one or more handles in full), `messages` (a full-file, chronological,
+filterable scan), `agents`/`agent` (every subagent, or one subagent's brief
+plus its own transcript digest — or a background Bash task's command and
+captured output), `grep` (full-file regex search with a byte pre-filter),
+and `span` (a chronological slice around a handle or between two handles).
+`list`/`load` stay byte-budgeted; the wave-2 commands that must search the
+whole file (`messages`, `grep`, `agents`) stream it forward in one pass
+rather than holding it in memory. All six take `--json`.
+
 |  | `--json` | `--all` | `--full-summary` | `--home` |
 | --- | --- | --- | --- | --- |
-| `session-summary` | **yes** | **yes** | n/a | **yes** (`list` and `load`) |
+| `claude-session-restore` | **yes** | **yes** | n/a | **yes** (`list` and `load`) |
 | `grok-session-restore` | **yes** | yes | yes | yes |
 | `kimi-session-restore` | **yes** | yes | yes | yes (`list` and `load`) |
 | `codex-session-restore` | yes | yes | n/a | yes |

@@ -40,8 +40,11 @@
 //! }
 //! ```
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+use super::root::OriginInfo;
 
 /// Attachment block wrapper
 ///
@@ -231,6 +234,38 @@ pub enum AttachmentType {
     /// ```
     AgentSpawn(AgentSpawn),
 
+    /// A message delivered mid-turn: either a genuine human message the
+    /// owner sent while a turn was already running, or a background-task
+    /// completion notice routed the same way. Emitted as a root-level
+    /// [`super::root::RootAttachmentEvent`], not nested in a progress event.
+    ///
+    /// # Example (human, mid-turn)
+    ///
+    /// ```json
+    /// {
+    ///   "type": "queued_command",
+    ///   "prompt": "...",
+    ///   "source_uuid": "...",
+    ///   "commandMode": "prompt",
+    ///   "origin": {"kind": "human"},
+    ///   "timestamp": "2026-09-24T23:09:10.816Z",
+    ///   "humanTurn": true
+    /// }
+    /// ```
+    ///
+    /// # Example (task notification, not human)
+    ///
+    /// ```json
+    /// {
+    ///   "type": "queued_command",
+    ///   "prompt": "<task-notification>...</task-notification>",
+    ///   "source_uuid": "...",
+    ///   "commandMode": "task-notification",
+    ///   "timestamp": "2026-09-24T23:06:27.726Z"
+    /// }
+    /// ```
+    QueuedCommand(QueuedCommand),
+
     /// Unknown attachment type (forward compatibility)
     #[serde(other)]
     Unknown,
@@ -251,6 +286,7 @@ impl AttachmentType {
             Self::EditedNotebookCell(_) => "edited_notebook_cell",
             Self::FileSnapshot(_) => "file_snapshot",
             Self::AgentSpawn(_) => "agent_spawn",
+            Self::QueuedCommand(_) => "queued_command",
             Self::Unknown => "unknown",
         }
     }
@@ -420,6 +456,53 @@ pub struct AgentSpawn {
     pub prompt: String,
 }
 
+/// A message delivered mid-turn — see [`AttachmentType::QueuedCommand`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedCommand {
+    /// Verbatim text delivered into the running turn.
+    pub prompt: String,
+
+    /// UUID of the originating queue entry.
+    pub source_uuid: Option<String>,
+
+    /// `"prompt"` for a genuine message, `"task-notification"` for a
+    /// background-task completion notice routed the same way.
+    #[serde(rename = "commandMode")]
+    pub command_mode: Option<String>,
+
+    /// Present with `kind: "human"` when a real person sent this message.
+    /// Absent on task-notification deliveries.
+    pub origin: Option<OriginInfo>,
+
+    /// Delivery timestamp.
+    pub timestamp: Option<DateTime<Utc>>,
+
+    /// `true` when this was rendered into the currently-running turn (as
+    /// opposed to becoming its own new conversation turn).
+    #[serde(rename = "humanTurn")]
+    pub human_turn: Option<bool>,
+
+    /// Marks a harness-generated delivery rather than something a person
+    /// sent, mirroring [`super::root::UserEvent::is_meta`].
+    #[serde(rename = "isMeta")]
+    pub is_meta: Option<bool>,
+}
+
+impl QueuedCommand {
+    /// Classify this delivery — see
+    /// [`crate::transcript::events::incoming::classify_queued_command_content`] for the
+    /// full decision order.
+    #[must_use]
+    pub fn incoming_kind(&self) -> crate::transcript::events::incoming::IncomingKind {
+        crate::transcript::events::incoming::classify_queued_command_content(
+            &self.prompt,
+            self.command_mode.as_deref(),
+            self.origin.as_ref(),
+            self.is_meta == Some(true),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,5 +617,47 @@ mod tests {
             assert_eq!(spawn.agent_slug, "rust-implementer");
             assert_eq!(spawn.prompt, "Implement feature X");
         }
+    }
+
+    #[test]
+    fn test_parse_queued_command_human_mid_turn() {
+        // Real shape (v2.1.282): a human message delivered mid-turn.
+        let json = r#"{
+            "type": "queued_command",
+            "prompt": "placeholder mid-turn message",
+            "source_uuid": "e1419965-e964-4e33-ac96-885ca7b816d4",
+            "commandMode": "prompt",
+            "origin": {"kind": "human"},
+            "timestamp": "2026-09-24T23:09:10.816Z",
+            "humanTurn": true
+        }"#;
+
+        let attachment: AttachmentType = serde_json::from_str(json).unwrap();
+        let AttachmentType::QueuedCommand(queued) = attachment else {
+            panic!("expected queued_command attachment");
+        };
+        assert_eq!(queued.prompt, "placeholder mid-turn message");
+        assert_eq!(queued.command_mode.as_deref(), Some("prompt"));
+        assert_eq!(
+            queued.incoming_kind(),
+            crate::transcript::events::incoming::IncomingKind::OwnerMidTurn("placeholder mid-turn message".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_queued_command_task_notification_is_not_human() {
+        let json = r#"{
+            "type": "queued_command",
+            "prompt": "<task-notification>\n<task-id>placeholder</task-id>\n</task-notification>",
+            "source_uuid": "942c613e-72b4-45b6-a9fe-fe2d7108396e",
+            "commandMode": "task-notification",
+            "timestamp": "2026-09-24T23:06:27.726Z"
+        }"#;
+
+        let attachment: AttachmentType = serde_json::from_str(json).unwrap();
+        let AttachmentType::QueuedCommand(queued) = attachment else {
+            panic!("expected queued_command attachment");
+        };
+        assert!(matches!(queued.incoming_kind(), crate::transcript::events::incoming::IncomingKind::TaskNotification(_)));
     }
 }

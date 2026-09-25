@@ -152,6 +152,7 @@ impl SystemEvent {
             version: self.version.clone(),
             git_branch: self.git_branch.clone(),
             slug: self.slug.clone(),
+            entrypoint: None,
         }
     }
 }

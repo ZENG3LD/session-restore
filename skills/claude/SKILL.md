@@ -33,14 +33,14 @@ When `GATE4AGENT_RESTORE_CLI_DIR` is nonempty, invoke `codex-session-restore.exe
 
 Do not list Claude sessions or ask the user to select one when the Codex session ID is explicit. Analyze the bounded report, then inspect git in the source workspace named by the request or report. Treat this as context reconstruction, not native provider resume.
 
-For `source=claude`, an explicit Claude JSONL path/UUID/prefix, or a request without an explicit provider, follow the existing Claude workflow below. Load an explicit Claude identifier directly from Bash:
+For `source=claude`, an explicit Claude JSONL path/UUID/prefix, or a request without an explicit provider, follow the Claude workflow below. Load an explicit Claude identifier directly from Bash:
 
 ```bash
-session_id='<JSONL-path-or-UUID-or-unique-prefix>'
+session_id='<JSONL-path-or-UUID-or-unique-prefix-of-at-least-8-chars>'
 if [ -n "${GATE4AGENT_RESTORE_CLI_DIR:-}" ]; then
-  helper="$GATE4AGENT_RESTORE_CLI_DIR/session-summary.exe"
+  helper="$GATE4AGENT_RESTORE_CLI_DIR/claude-session-restore.exe"
 else
-  helper='session-summary.exe'
+  helper='claude-session-restore.exe'
 fi
 args=(load "$session_id")
 if [ -n "${GATE4AGENT_RESTORE_CLAUDE_HOME:-}" ]; then
@@ -62,200 +62,79 @@ Use this skill when:
 
 ## Restoration Process
 
-### Step 1: Find and Analyze Recent Session Files
-
-Use the `session-summary` CLI tool to list recent sessions with automatic topic extraction:
+### Step 1: List recent sessions
 
 ```bash
-# List recent sessions (default: last 12 hours, includes both projects/ and archive/)
-session-summary.exe list
-
-# Extend time window to 24 hours
-session-summary.exe list --max-age-hours 24
-
-# Only search projects directory (exclude archive)
-session-summary.exe list --projects-only
+claude-session-restore.exe list
 ```
 
-**What you'll see for each session:**
-- **Date/time**: When it was last modified
-- **Size**: File size (indicates session length)
-- **Source**: [projects] or [archive]
-- **Topic**: the session's own title — Claude Code's `custom-title` if the session has one, else its `ai-title`, else the latest `last-prompt`, else the session's first real human prompt. This is the provider's own title, not an inferred label — trust it.
-- **Preview lines** with emoji labels, each one a verbatim quote from the transcript:
-  - 📋 Tasks - delegated agent task prompts (only present on older sessions with `agent_progress` events; rare on current transcripts)
-  - 💬 User - user messages
-  - 🔧 Tools - tool calls with their key argument (e.g. `Bash: cargo build --release`)
-  - ⚙️ Bash - bash commands recognized as build/test/git activity
-  - 🔍 Search - web search queries
-
-If the window is empty, the tool says so and suggests widening it (`--max-age-hours <N>` or `--all`) — don't assume "no output" means "no sessions".
-
-**Example output**:
-```
-Recent Sessions:
-
-1. 8f59d651-cada-4484-9153-5cc577137486
-   Jan 26 04:33 | 32.42 MB | [projects] | Chart Settings dropdown z-order fix
-   💬 User: дропдауны либо с 0 опасити... → закомить работу...
-   🔧 Tools: Bash: cargo build --release, Edit: chart_settings.rs
-
-2. 4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0
-   Jan 26 05:47 | 103.69 MB | [projects] | MOEX ISS API connector
-   💬 User: да, какие проблемы выявлены... → продолжи
-   🔧 Tools: Bash: cargo test, Task: implement MOEX connector
-
-3. 3162998f-09ca-4efc-b659-8507eb57bd37
-   Jan 26 00:21 | 232.79 MB | [archive] | Create 2-turn conversation test
-   💬 User: Create 2-turn conversation test... → Run the tests...
-   🔧 Tools: Grep: fn main, Read: tests/conversation.rs
-   ⚙️ Bash: cargo check; compiling...
-
-To load a session, use:
-  1. session-summary.exe load "C:\Users\...\8f59d651-cada-4484-9153-5cc577137486.jsonl"
-  2. session-summary.exe load "C:\Users\...\4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0.jsonl"
-  3. session-summary.exe load "C:\Users\...\3162998f-09ca-4efc-b659-8507eb57bd37.jsonl"
-```
-
-**Ask user which session to restore, then copy-paste the corresponding load command**
-
-### Step 2: Deep Dive into Selected Session
-
-Once user selects a session, copy-paste the corresponding load command from the list output:
+Default window is the last 12 hours, `-l`/`--limit` 30 sessions, both `projects/` and `archive/`. If the owner named a topic, filter instead of scrolling:
 
 ```bash
-# Copy the full command from "To load a session" section above
-session-summary.exe load "C:\Users\...\session-id.jsonl"
+claude-session-restore.exe list --grep "payments"
 ```
 
-**Example output**:
-```
-═══════════════════════════════════════
-Session: 8f59d651-cada-4484-9153-5cc577137486
-═══════════════════════════════════════
-Date: 2026-01-26 04:33:18
-Size: 32.42 MB
-Topic: Chart Settings dropdown z-order fix
+`--grep` matches the session title, its `last-prompt`, and every human prompt in the bytes already read; with `--grep` and no explicit `--max-age-hours`, the search covers every age, not just 12h. Add `--all` to ignore age entirely without a filter word, `--projects-only` to skip `archive/`.
 
-User Messages 💬 (2 messages)
-  1. закомить работу в ваших крейтах (чужую не комить)
-  2. итого подведи итог что мы сделали по унификации...
+Each entry is compact — number, UUID, date/size/source/title, the first and last human prompt, and (only when true) a `⚠` line flagging a queued message that never got delivered or a last owner message the agent never answered. Never skip this step and never grep the raw JSONL by hand to find a session — `list`/`--grep` is the query surface. **Ask the owner which session to restore** before loading one, unless the request already named an explicit UUID.
 
-Assistant Texts 🤖 (3 texts)
-  1. Готово — коммит сделан только в наших крейтах, чужие не трогал.
-  2. Итог: унифицировал dropdown z-order через общий overlay-слой...
-  3. ...
-
-Tool Operations 🔧 (7 operations)
-  1. Task: fix dropdown z-order in Chart Settings modal
-  2. Bash: cargo build --release
-  3. Edit: zengeld-terminal/ui/chart_settings.rs
-  4. Read: zengeld-terminal/ui/dropdown.rs
-  ... (3 more)
-
-Files Touched 📁 (17 files)
-  1. zengeld-terminal/ui/chart_settings.rs
-  2. zengeld-terminal/ui/dropdown.rs
-  3. zengeld-terminal/ui/modal.rs
-  ... (14 more)
-
-Git Branch: zengeld-chart
-```
-
-The tool automatically:
-- Reads a byte-budgeted window from the end of the file (bounded, not a full-file scan — a multi-gigabyte transcript still loads in well under a second)
-- Restricts that window to events after the last compaction boundary, when one is present
-- Prints every section as verbatim quotes: user prompts, assistant text, tool calls with their key argument, system errors, files touched, git branch, and commit-message hints found in the quoted text
-- Never writes its own summary of what happened — Step 3 cross-checks these quotes against git, and Step 4 presents them; neither step rewrites them in the model's own words
-
-### Step 3: Search Git History
-
-Search for related commits to understand what was accomplished:
+### Step 2: Load the selected session (wave 1)
 
 ```bash
-# Extract keywords from session (project names, features, etc.)
-# Then search git log with those keywords
+claude-session-restore.exe load <uuid>
+```
 
+An 8+ character UUID prefix is accepted (ambiguous prefixes list their candidate UUIDs with titles instead of guessing). The report is a bounded (~180-line) verbatim digest, never an agent-written summary. **Every item carries an `@o<byte-offset>` handle** — the exact pointer wave-2 commands take:
+
+1. **Header** — id, path, cwd, git branch, entrypoint, version, first/last event time, size, title (+ source), compaction count, subagent count.
+2. **First prompts** — the first 3 human prompts, read from the true start of the file, each with its handle.
+3. **Last compaction summary** — handle, timestamp, length, and the first ~600 chars of the densest pre-compaction recap, when one exists.
+4. **Last owner messages** — the last 8 human messages, each with a handle, timestamped, and tagged `turn` or `mid-turn` (sent while a turn was already running).
+5. **Last incoming from other sessions** — the last 3 cross-session/subagent hand-back messages.
+6. **Stuck / not answered** — only when non-empty: queued messages never delivered, an unanswered last message, interruption markers, recent errors — each with a handle.
+7. **Open work at end** — the last `TodoWrite`/`TaskCreate`/`TaskUpdate` call verbatim, plus any subagents or Bash tasks still running.
+8. **Last agent reports** — the last 5 main-chain assistant text blocks, verbatim, with handles.
+9. **Subagents** — the last 10 delegated `Agent`/`Task` launches with their final status (`running`, `completed`, `failed`, `killed`, …) and a short excerpt; addressed by `agentId`/short id, not by handle.
+10. **Commits made in this session** — parsed from `git commit`'s own confirmation line in Bash tool results (real commits, never guessed), plus a free-text "commit hints" fallback line.
+11. **Files edited** — deduped `Edit`/`Write`/`NotebookEdit` paths with an edit count, most recent first.
+12. **Last tool operations** — the last 10, one line each, with handles.
+13. **Drill-down footer** — the exact wave-2 commands to run next, pre-filled with this session's own handles/ids.
+
+`--json` emits the same report as machine-readable JSON (schema `claude-session-restore-load-v3`); `--debug` prints an unrecognized-event-type histogram to stderr only.
+
+### Step 3: Drill down with wave-2 commands, using the footer
+
+Read the printed **Drill-down** footer first — it already has this session's own handles filled in. Run 1–3 targeted wave-2 commands, never more than the question needs:
+
+```bash
+claude-session-restore.exe show <uuid> <handle>...          # full verbatim record(s) for one or more handles
+claude-session-restore.exe messages <uuid> --kind owner --last 20   # full-file, chronological, every classified message
+claude-session-restore.exe agents <uuid>                     # every subagent the session ever launched
+claude-session-restore.exe agent <uuid> <agentId|tool-use-id|task-id>  # one subagent's brief + its own transcript digest, or a Bash task's command + captured output
+claude-session-restore.exe grep <uuid> <pattern> [-C N]      # full-file regex search; hits with handle, kind, time, snippet
+claude-session-restore.exe span <uuid> --around <handle> -n 10   # a chronological slice around one point
+```
+
+Typical picks: `show` the compaction summary handle when one exists, `agent` a subagent that's still `running` or ended `failed`, `grep` for whatever topic the owner named. All six take `--json`. **Never hand-parse the raw JSONL** — every wave-2 command reads the whole file when the question needs that (streaming, never loading it all into memory); if a question the tool can't yet answer comes up, the fix belongs in the tool, not in ad hoc parsing.
+
+### Step 4: Search Git History
+
+```bash
 git log --all --oneline --grep="keyword1" --grep="keyword2" -i --since="1 week ago" | head -30
-
-# Get detailed commit info
 git show --stat <commit-hash>
 ```
 
-**Look for**:
-- Commits made during or after the session timestamp
-- Commit messages describing the feature/fix being worked on
-- File changes that match the session's tracked files
+Look for commits made during or after the session's timestamps, and file changes matching what the digest named — or cross-check the digest's own **Commits made in this session** section, which already parsed real `git commit` confirmations out of the transcript.
 
-### Step 4: Show the Digest, Then Continue the Work
+### Step 5: Show the Digest, Then Continue the Work
 
-Show the user (or just yourself, if working unattended) the tool's own output — the `Topic`, `User Messages`, `Assistant Texts`, `Tool Operations`, `Errors`, and `Files Touched` sections it already printed in Step 2, plus whatever related commits Step 3 found. Do not write your own prose summary of "what was being worked on" — the verbatim quotes and the commit list already say that; paraphrasing them risks misstating something the transcript said precisely. Then continue the actual work: open the files it named, pick up the last unfinished task, or ask the one clarifying question the quotes leave open.
+Show the tool's own output — the header, the owner's own messages, the agent's own last reports, the subagent outcomes, and whatever wave-2 drill-down you ran — plus whatever related commits Step 4 found. Do not write your own prose summary of "what was being worked on"; the verbatim quotes already say that, and paraphrasing risks misstating something the transcript said precisely. Then continue the actual work: open the files the digest named, pick up the last unfinished task (check `Stuck / not answered` and `Open work at end` first), or ask the one clarifying question the quotes leave open.
 
 ## Important Notes
 
-- **Session files can be VERY large** (2GB+) — reads are byte-budgeted from both ends of the file (a bounded seek + read, not a full-file scan), so this stays fast regardless of file size
-- **Digest, not summary** — every section is a verbatim quote from the transcript; never write your own synthesis of what the session covered
-- **Topic is the provider's own title** — `custom-title` first, then `ai-title`, then `last-prompt`, then the session's first real human prompt; trust it, don't second-guess it against the raw data
-- **Git commits are the best independent check** — they show what was actually accomplished, versus what the transcript merely discussed
-- **Timestamps help** - cross-reference session time with commit times
-- **Time filtering** - default 12 hours, can extend to 24 hours with --max-age-hours
-
-## Example Usage
-
-```
-User: "restore previous session"
-Assistant: [Runs restore-session skill]
-
-I'll list recent sessions from the last 12 hours:
-
-[runs: session-summary.exe list]
-
-Recent Sessions:
-
-1. 8f59d651-cada-4484-9153-5cc577137486
-   Jan 26 04:33 | 32.42 MB | [projects] | Chart Settings dropdown z-order fix
-   💬 User: дропдауны либо с 0 опасити... → закомить работу...
-   🔧 Tools: Bash: cargo build --release, Edit: chart_settings.rs
-
-2. 4e0b5d3d-c6d1-497d-9c6f-96e83980c7a0
-   Jan 26 05:47 | 103.69 MB | [projects] | MOEX ISS API connector
-   💬 User: да, какие проблемы выявлены... → продолжи
-   🔧 Tools: Bash: cargo test, Task: implement MOEX connector
-
-3. 3162998f-09ca-4efc-b659-8507eb57bd37
-   Jan 26 00:21 | 232.79 MB | [archive] | Create 2-turn conversation test
-   💬 User: Create 2-turn conversation test... → Run the tests...
-   🔧 Tools: Grep: fn main, Read: tests/conversation.rs
-   ⚙️ Bash: cargo check; compiling...
-
-To load a session, use:
-  1. session-summary.exe load "C:\Users\...\8f59d651-cada-4484-9153-5cc577137486.jsonl"
-  ...
-
-Which session would you like to restore? (1-3)
-
-User: "1"
-Assistant: [Runs the load command]
-
-[runs: session-summary.exe load "C:\Users\...\8f59d651-cada-4484-9153-5cc577137486.jsonl"]
-
-[Shows the tool's own Topic/User Messages/Assistant Texts/Tool Operations/Files Touched output verbatim]
-[Searches git log for related commits]
-[Continues from the last file the digest and git log point to — no rewritten summary]
-```
-
-## Implementation Tips
-
-1. **Always start with the most recent** sessions from the active project
-2. **Check both locations**: `~/.claude/projects/` and `~/.claude/archive/`
-3. **Parse JSONL carefully**: Each line is a separate JSON object
-4. **Cross-reference**: Session files + git log = complete picture
-5. **Ask user**: If multiple sessions found, let user choose
-6. **`--json`** is available on both `list` and `load` for machine consumption; the human-readable format above is unchanged when `--json` is omitted
-
-## Limitations
-
-- Cannot restore actual conversation history (that's internal to Claude)
-- Can only infer context from files and commits
-- Very old sessions might not have related commits anymore
-- Archived sessions may be compressed or incomplete
+- **Session files can be VERY large (2GB+)** — `list`/`load` read a byte-budgeted window from each end of the file, so they stay fast regardless of size; wave-2 commands that must search the whole file (`messages`, `grep`, `agents`) stream it forward in one pass rather than loading it into memory.
+- **Digest, not summary** — every section is a verbatim quote, a count, or a handle; never write your own synthesis.
+- **Handles are stable** — `@o<byte-offset>` never moves once written (transcripts are append-only), so a handle from an earlier `load` still works later.
+- **Topic is the provider's own title** — `custom-title` first, then `ai-title`, then `last-prompt`, then the session's first real human prompt.
+- **A `⚠`/Stuck flag is a lead, not proof** — verify against git before relying on it.
+- **`--json`** is available on `list`, `load`, and every wave-2 command for machine consumption.

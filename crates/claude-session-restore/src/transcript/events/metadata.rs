@@ -91,6 +91,12 @@ pub struct EventMetadata {
     /// Present in progress events when using agents.
     /// Examples: `"rust-implementer"`, `"research-agent"`
     pub slug: Option<String>,
+
+    /// How the session was launched: `"claude-desktop"`, `"cli"`, or
+    /// `"sdk-cli"`. `"sdk-cli"` means a program (not a person at a terminal)
+    /// drove the whole session — its `origin.kind: "human"` prompts were
+    /// sent by that program, not typed by a person.
+    pub entrypoint: Option<String>,
 }
 
 /// Logical parent UUID (for compact boundaries)
@@ -173,6 +179,7 @@ mod tests {
             version: Some("2.1.19".to_string()),
             git_branch: Some("main".to_string()),
             slug: None,
+            entrypoint: None,
         };
 
         assert!(metadata.is_user_prompt());
@@ -193,6 +200,7 @@ mod tests {
             version: Some("2.1.19".to_string()),
             git_branch: Some("main".to_string()),
             slug: None,
+            entrypoint: None,
         };
 
         assert!(!metadata.is_user_prompt());
@@ -212,6 +220,7 @@ mod tests {
             version: Some("2.1.19".to_string()),
             git_branch: Some("main".to_string()),
             slug: None,
+            entrypoint: None,
         };
 
         assert!(metadata.is_sidechain());

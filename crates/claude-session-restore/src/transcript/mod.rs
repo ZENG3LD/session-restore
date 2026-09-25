@@ -1,6 +1,6 @@
 //! Type definitions for Claude Code session events
 //!
-//! This library provides Rust types for parsing Claude Code session JSONL files.
+//! Rust types for the records of a Claude Code session JSONL file.
 
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::doc_markdown)]

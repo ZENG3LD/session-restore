@@ -165,17 +165,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "claude-session-types"
-version = "0.1.0"
+name = "claude-session-restore"
+version = "0.1.1"
 dependencies = [
+ "anyhow",
  "chrono",
+ "clap",
+ "colored",
+ "dirs",
+ "regex",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "codex-session-restore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "serde",
@@ -296,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "grok-session-restore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -359,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "kimi-session-restore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -563,21 +568,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "session-summary"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "claude-session-types",
- "colored",
- "dirs",
- "regex",
- "serde",
- "serde_json",
 ]
 
 [[package]]

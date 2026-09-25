@@ -20,7 +20,7 @@
 //! Use serde's tagged enum to automatically parse based on `type` field:
 //!
 //! ```rust
-//! use claude_session_types::events::SessionEvent;
+//! use claude_session_restore::transcript::events::SessionEvent;
 //!
 //! let line = r#"{"type": "user", "uuid": "test-uuid", "sessionId": "session-1", "timestamp": "2024-01-01T00:00:00Z", "isSidechain": false, "message": {"role": "user", "content": "hello"}}"#;
 //! let event: SessionEvent = serde_json::from_str(line)?;
@@ -363,18 +363,61 @@ impl SessionEvent {
     }
 }
 
-/// Origin of a `user` turn.
+/// Origin of a `user` turn or a `queued_command` delivery.
 ///
 /// Real `kind` values seen on disk: `"human"` (a genuine human-typed
 /// prompt), `"task-notification"` (a delegated agent's completion notice
 /// routed back as a `user` turn), and `"peer"` (a message from another
-/// Claude session, e.g. a cross-session hand-back). Other fields vary by
-/// `kind` and are not modeled — only `kind` is needed to exclude
-/// harness-generated turns from a restore digest.
+/// Claude session — a cross-session message, a host-injected notice, or a
+/// subagent hand-back). Anything else (e.g. `"coordinator"`, seen on a
+/// handful of transcripts) is treated as harness noise by
+/// [`crate::transcript::events::incoming::classify_user_content`].
+///
+/// `peer` carries one of three field shapes, all flattened into `extra`
+/// rather than modeled individually (see the accessors below):
+/// - `{from, name, fromMode, msg_id, body[, fromSession][, hopChain]}` — a
+///   cross-session message; `name` is the sender session's title;
+/// - `{from, hostInjected: true}` — a host-injected peer text;
+/// - `{from, body, handback, senderTaskId}` — a subagent hand-back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginInfo {
     /// Origin kind, e.g. `"human"`, `"task-notification"`, `"peer"`
     pub kind: String,
+
+    /// Every other field the `origin` object carries — shape varies by
+    /// `kind` and by transcript version; see the accessors below.
+    #[serde(flatten)]
+    pub extra: JsonValue,
+}
+
+impl OriginInfo {
+    /// `origin.from` — a peer sender's session/task identity.
+    #[must_use]
+    pub fn from_field(&self) -> Option<&str> {
+        self.extra.get("from").and_then(JsonValue::as_str)
+    }
+
+    /// `origin.name` — a peer sender session's display title, when present
+    /// (cross-session messages only; absent on a subagent hand-back).
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.extra.get("name").and_then(JsonValue::as_str)
+    }
+
+    /// `origin.body` — the clean message text, when the harness already
+    /// extracted it (cross-session messages and subagent hand-backs carry
+    /// this; a host-injected peer text does not).
+    #[must_use]
+    pub fn body(&self) -> Option<&str> {
+        self.extra.get("body").and_then(JsonValue::as_str)
+    }
+
+    /// Whether `origin.handback` is present — marks a subagent's
+    /// final-report hand-back.
+    #[must_use]
+    pub fn is_handback(&self) -> bool {
+        self.extra.get("handback").is_some()
+    }
 }
 
 /// User message event
@@ -413,10 +456,21 @@ pub struct UserEvent {
     /// exclusion signal.
     pub origin: Option<OriginInfo>,
 
+    /// Corroborating origin signal used when `origin` itself is absent:
+    /// `"human"`, `"task_notification"`, `"peer"`, or `"sdk"`.
+    #[serde(rename = "turnOrigin")]
+    pub turn_origin: Option<String>,
+
+    /// Delivery path, not the sender: `"sdk"` is the normal desktop-app
+    /// path, `"typed"` is the CLI, `"queued"` means delivered from the
+    /// queue after the turn, `"system"` means harness-generated.
+    #[serde(rename = "promptSource")]
+    pub prompt_source: Option<String>,
+
     /// Tool result (if this is a tool result message)
     ///
     /// Deserialized leniently — see
-    /// [`crate::events::tool_result::deserialize_tool_use_result_lenient`].
+    /// [`crate::transcript::events::tool_result::deserialize_tool_use_result_lenient`].
     #[serde(
         rename = "toolUseResult",
         deserialize_with = "super::tool_result::deserialize_tool_use_result_lenient",
@@ -499,108 +553,28 @@ impl UserEvent {
             .collect()
     }
 
-    /// Classify this turn's content for a restore digest.
-    ///
-    /// Excludes, as [`UserTurnKind::HarnessNotification`]:
-    /// - non-external turns (tool results routed back as `user` events with
-    ///   `userType` unset or `"internal"`)
-    /// - `isMeta` turns (harness-injected notices)
-    /// - `isCompactSummary` turns (the synthesized replay of a compacted
-    ///   conversation, written back as a `user` turn — not human-authored)
-    /// - turns whose `origin.kind` is `"task-notification"` (a delegated
-    ///   agent's completion notice) or `"peer"` (a cross-session message)
-    /// - turns whose content is only tool results (no text block at all —
-    ///   handled implicitly, since [`ContentBlock::as_text`] only matches
-    ///   text blocks)
-    /// - local-command echoes (`<local-command-caveat>`,
-    ///   `<local-command-stdout>`, `<local-command-stderr>`), stray
-    ///   `<task-notification>`/`<system-reminder>` text blocks not caught by
-    ///   the structural checks above
-    ///
-    /// Recognizes, as [`UserTurnKind::SlashCommand`]: a `<command-name>`
-    /// invocation — a real user action, not free text, but not a harness
-    /// notification either. The caller decides how to render it.
-    ///
-    /// Everything else is [`UserTurnKind::HumanPrompt`] — including
-    /// system-generated notices of a genuine user action, e.g.
-    /// `[Request interrupted by user]`, which reflect something the human
-    /// actually did even though the string wasn't typed character-by-character.
+    /// Classify this turn's content for a restore digest — see
+    /// [`crate::transcript::events::incoming::classify_user_content`] for the full
+    /// decision order. Non-`external` turns and tool-result-only turns
+    /// (no text block at all) are always [`crate::transcript::events::incoming::IncomingKind::Harness`].
     #[must_use]
-    pub fn classify_turn(&self) -> UserTurnKind<'_> {
+    pub fn incoming_kind(&self) -> crate::transcript::events::incoming::IncomingKind {
+        use crate::transcript::events::incoming::IncomingKind;
+
         if self.metadata.user_type.as_deref() != Some("external") {
-            return UserTurnKind::HarnessNotification;
+            return IncomingKind::Harness;
         }
-        if self.is_meta == Some(true) {
-            return UserTurnKind::HarnessNotification;
-        }
-        if self.is_compact_summary == Some(true) {
-            return UserTurnKind::HarnessNotification;
-        }
-        if matches!(
-            self.origin.as_ref().map(|origin| origin.kind.as_str()),
-            Some("task-notification" | "peer")
-        ) {
-            return UserTurnKind::HarnessNotification;
-        }
-
         let Some(text) = self.message.content.iter().find_map(ContentBlock::as_text) else {
-            return UserTurnKind::HarnessNotification;
+            return IncomingKind::Harness;
         };
-        let trimmed = text.trim_start();
 
-        if trimmed.starts_with("<command-name>") {
-            if let (Some(name), Some(args)) =
-                (extract_tag(trimmed, "command-name"), extract_tag(trimmed, "command-args"))
-            {
-                return UserTurnKind::SlashCommand { name, args };
-            }
-        }
-
-        const NOTIFICATION_PREFIXES: [&str; 5] = [
-            "<local-command-caveat>",
-            "<local-command-stdout>",
-            "<local-command-stderr>",
-            "<task-notification>",
-            "<system-reminder>",
-        ];
-        if NOTIFICATION_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
-            return UserTurnKind::HarnessNotification;
-        }
-
-        UserTurnKind::HumanPrompt(text)
+        crate::transcript::events::incoming::classify_user_content(
+            text,
+            self.is_compact_summary == Some(true),
+            self.origin.as_ref(),
+            self.is_meta == Some(true),
+        )
     }
-}
-
-/// Classification of a `user` event's content for a restore digest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UserTurnKind<'a> {
-    /// Genuine human-authored prompt text, or a system-generated notice of a
-    /// real user action (e.g. an interruption marker).
-    HumanPrompt(&'a str),
-    /// A slash-command invocation, e.g. `/model` with argument
-    /// `claude-fable-5`, or `/compact` with no arguments. A real user
-    /// action, but not free text — the caller decides how to render it
-    /// (e.g. `"/model claude-fable-5"`).
-    SlashCommand {
-        /// Command name, including its leading slash (e.g. `"/model"`)
-        name: &'a str,
-        /// Raw argument text, possibly empty
-        args: &'a str,
-    },
-    /// A harness-generated notice with no human-authored content: a
-    /// non-external/tool-result turn, an `isMeta` or `isCompactSummary`
-    /// turn, a task-notification or peer/cross-session message, or a
-    /// local-command echo.
-    HarnessNotification,
-}
-
-/// Extract the text between `<tag>` and `</tag>` in `text`, if both are present.
-fn extract_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = text.find(&open)? + open.len();
-    let end = start + text[start..].find(&close)?;
-    Some(&text[start..end])
 }
 
 /// Assistant message event
@@ -801,10 +775,14 @@ pub struct Snapshot {
 
 /// Queue operation event
 ///
-/// Tracks session queue management.
+/// Tracks session queue management: a human (or harness-generated) message
+/// enters the queue on `"enqueue"` and leaves it on `"dequeue"` or
+/// `"remove"`. Real transcripts (v2.1.28x) only emit `"enqueue"` and
+/// `"remove"` — `"dequeue"` is modeled for forward compatibility with older
+/// or future transcript shapes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueOperation {
-    /// Operation type: "enqueue" or "dequeue"
+    /// Operation type: `"enqueue"`, `"dequeue"`, or `"remove"`
     pub operation: String,
 
     /// Session ID
@@ -813,6 +791,29 @@ pub struct QueueOperation {
 
     /// Timestamp
     pub timestamp: DateTime<Utc>,
+
+    /// Verbatim text of the queued item: a human message or a
+    /// `<task-notification>`-tagged block. Absent on transcript shapes that
+    /// predate this field.
+    pub content: Option<String>,
+
+    /// Why the item left the queue, e.g. `"absorbed_mid_turn"` when a
+    /// `"remove"` delivered the message inside the turn already running
+    /// (see [`crate::transcript::events::attachment::AttachmentType::QueuedCommand`])
+    /// rather than as a new conversation turn. Only present on some
+    /// `"remove"` operations.
+    pub reason: Option<String>,
+}
+
+impl QueueOperation {
+    /// Classify `content` via [`crate::transcript::events::incoming::classify_plain_text`]
+    /// — the queue-operation shape never carries an `origin` field, so this
+    /// is always the content-tag fallback path. `None` when there is no
+    /// content at all (a bare `dequeue`, or an image-only paste).
+    #[must_use]
+    pub fn incoming_kind(&self) -> Option<crate::transcript::events::incoming::IncomingKind> {
+        self.content.as_deref().map(crate::transcript::events::incoming::classify_plain_text)
+    }
 }
 
 /// Session summary
@@ -837,7 +838,7 @@ pub struct SessionSummary {
 /// Root-level attachment event
 ///
 /// Same payload as the nested attachment field in progress
-/// `normalizedMessages` (see [`crate::events::attachment::AttachmentType`]),
+/// `normalizedMessages` (see [`crate::transcript::events::attachment::AttachmentType`]),
 /// emitted directly at the root. Real example:
 ///
 /// ```json
@@ -856,7 +857,7 @@ pub struct RootAttachmentEvent {
     pub metadata: EventMetadata,
 
     /// Attachment payload
-    pub attachment: crate::events::attachment::AttachmentType,
+    pub attachment: crate::transcript::events::attachment::AttachmentType,
 }
 
 /// `custom-title` event — the session title Claude Code's own UI shows.
@@ -1189,31 +1190,34 @@ mod tests {
     // See docs/session-restore/audits/2026-09-23-restorers-live-test.md.
     // ------------------------------------------------------------------
 
+    use crate::transcript::events::incoming::IncomingKind;
+
     #[test]
     fn test_parse_user_event_with_bare_string_content() {
         // Real shape: plain single-turn human prompts carry `content` as a
-        // bare string, not an array of blocks (D1).
+        // bare string, not an array of blocks (D1). No `origin` field at
+        // all — the legacy no-origin fallback path.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"placeholder prompt text"},"uuid":"user-uuid","timestamp":"2026-09-05T23:53:25.920Z","permissionMode":"auto","userType":"external","entrypoint":"claude-desktop","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
 
         let event: SessionEvent = serde_json::from_str(json).expect("bare string content must parse");
         let SessionEvent::User(user) = event else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HumanPrompt("placeholder prompt text"));
+        assert_eq!(user.incoming_kind(), IncomingKind::Owner("placeholder prompt text".to_string()));
     }
 
     #[test]
-    fn test_classify_turn_skips_meta_turns() {
+    fn test_incoming_kind_skips_meta_turns() {
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<local-command-caveat>Caveat: placeholder</local-command-caveat>"},"isMeta":true,"uuid":"user-uuid","timestamp":"2026-09-06T00:14:48.155Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert_eq!(user.incoming_kind(), IncomingKind::Harness);
     }
 
     #[test]
-    fn test_classify_turn_recognizes_slash_command_with_args() {
+    fn test_incoming_kind_recognizes_slash_command_with_args() {
         // Real shape: `/model claude-fable-5`.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>placeholder-model</command-args>"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
 
@@ -1221,24 +1225,27 @@ mod tests {
             panic!("expected user event");
         };
         assert_eq!(
-            user.classify_turn(),
-            UserTurnKind::SlashCommand { name: "/model", args: "placeholder-model" }
+            user.incoming_kind(),
+            IncomingKind::OwnerCommand { name: "/model".to_string(), args: "placeholder-model".to_string() }
         );
     }
 
     #[test]
-    fn test_classify_turn_recognizes_slash_command_without_args() {
+    fn test_incoming_kind_recognizes_slash_command_without_args() {
         // Real shape: `/compact` with an empty `<command-args>` tag.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::SlashCommand { name: "/compact", args: "" });
+        assert_eq!(
+            user.incoming_kind(),
+            IncomingKind::OwnerCommand { name: "/compact".to_string(), args: String::new() }
+        );
     }
 
     #[test]
-    fn test_classify_turn_skips_local_command_stdout_and_stderr() {
+    fn test_incoming_kind_skips_local_command_stdout_and_stderr() {
         for content in [
             "<local-command-stdout>Set model to placeholder</local-command-stdout>",
             "<local-command-stderr>placeholder error</local-command-stderr>",
@@ -1249,68 +1256,69 @@ mod tests {
             let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(&json).unwrap() else {
                 panic!("expected user event");
             };
-            assert_eq!(
-                user.classify_turn(),
-                UserTurnKind::HarnessNotification,
-                "must skip: {content}"
-            );
+            assert_eq!(user.incoming_kind(), IncomingKind::Harness, "must skip: {content}");
         }
     }
 
     #[test]
-    fn test_classify_turn_skips_task_notification_by_content_and_by_origin() {
+    fn test_incoming_kind_task_notification_by_content_and_by_origin() {
         // By content prefix alone (no origin field — defense in depth).
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>placeholder</task-id>\n<status>completed</status>\n</task-notification>"},"uuid":"user-uuid","timestamp":"2026-09-22T00:00:00.000Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert!(matches!(user.incoming_kind(), IncomingKind::TaskNotification(_)));
 
         // Real shape: `origin: {"kind": "task-notification"}`.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"placeholder result text, not a real prompt"},"uuid":"user-uuid","timestamp":"2026-09-22T00:00:00.000Z","userType":"external","origin":{"kind":"task-notification"},"cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert!(matches!(user.incoming_kind(), IncomingKind::TaskNotification(_)));
     }
 
     #[test]
-    fn test_classify_turn_skips_peer_cross_session_message() {
-        // Real shape: `origin: {"kind": "peer", ...}`, isMeta true.
-        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"placeholder\">placeholder body</cross-session-message>"},"isMeta":true,"origin":{"kind":"peer"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
+    fn test_incoming_kind_peer_cross_session_message() {
+        // Real shape: `origin: {"kind": "peer", "from": "...", "name": "...", ...}`, isMeta true.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"placeholder-from\" name=\"placeholder-name\">placeholder body</cross-session-message>"},"isMeta":true,"origin":{"kind":"peer","from":"placeholder-from","name":"placeholder-name","fromMode":"prompting","msg_id":"m1","body":"placeholder body"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert_eq!(
+            user.incoming_kind(),
+            IncomingKind::Peer {
+                text: "placeholder body".to_string(),
+                sender: Some("placeholder-name".to_string()),
+                handback: false,
+            }
+        );
     }
 
     #[test]
-    fn test_classify_turn_skips_compact_summary() {
+    fn test_incoming_kind_compact_summary() {
         // Real shape: `isCompactSummary: true` — the synthesized replay text
-        // Claude Code writes back as a `user` turn after compaction. userType
-        // is "external" and isMeta is absent, so only the dedicated field
-        // catches this.
+        // Claude Code writes back as a `user` turn after compaction.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. Summary: placeholder"},"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"uuid":"user-uuid","timestamp":"2026-09-10T00:00:00.000Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.258","gitBranch":"main"}"#;
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert_eq!(user.incoming_kind(), IncomingKind::CompactSummary);
     }
 
     #[test]
-    fn test_classify_turn_keeps_interruption_marker_as_human_prompt() {
+    fn test_incoming_kind_interrupt_marker_without_origin() {
         // Real shape: an array-content turn holding only a text block that
         // is a system-generated notice of a genuine user action (hitting
-        // Escape), not free text — still counts as human.
+        // Escape), no `origin` field — legacy fallback path.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:27.169Z","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HumanPrompt("[Request interrupted by user]"));
+        assert_eq!(user.incoming_kind(), IncomingKind::Interrupt("[Request interrupted by user]".to_string()));
     }
 
     #[test]
-    fn test_classify_turn_skips_tool_result_only_turn() {
+    fn test_incoming_kind_skips_tool_result_only_turn() {
         // Real shape: a user turn whose content array holds only a
         // tool_result block (a system-reminder response), no text block.
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":[{"tool_use_id":"tool-use-id","type":"tool_result","content":"<system-reminder>placeholder warning</system-reminder>"}]},"uuid":"user-uuid","timestamp":"2026-08-30T23:51:17.045Z","toolUseResult":{"type":"text","file":{"filePath":"C:\\work\\out.txt","content":"","numLines":1,"startLine":1,"totalLines":1}},"sourceToolAssistantUUID":"assistant-uuid","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
@@ -1320,21 +1328,60 @@ mod tests {
         let SessionEvent::User(user) = event else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert_eq!(user.incoming_kind(), IncomingKind::Harness);
         assert!(user.tool_use_result.is_none());
     }
 
     #[test]
-    fn test_classify_turn_skips_internal_user_type() {
+    fn test_incoming_kind_skips_internal_user_type() {
         let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"placeholder"},"uuid":"user-uuid","timestamp":"2026-08-28T17:02:33.492Z","userType":"internal","cwd":"C:\\work","sessionId":"session-123","version":"2.1.246","gitBranch":"main"}"#;
 
         let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
             panic!("expected user event");
         };
-        assert_eq!(user.classify_turn(), UserTurnKind::HarnessNotification);
+        assert_eq!(user.incoming_kind(), IncomingKind::Harness);
     }
 
-    use crate::events::attachment::AttachmentType;
+    #[test]
+    fn test_incoming_kind_owner_text_survives_leading_system_reminder() {
+        // Real shape (survey row 696): origin.kind human, a harness
+        // reminder about a background task followed by the owner's real
+        // question in the same record.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<system-reminder>\nThe user started your suggested background task task_placeholder (\"placeholder\") in a separate local session. It is running independently. You will be notified here when it ends.\n</system-reminder>\n\nplaceholder real owner question"},"uuid":"user-uuid","timestamp":"2026-09-24T21:34:40.791Z","origin":{"kind":"human"},"userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.280","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.incoming_kind(), IncomingKind::Owner("placeholder real owner question".to_string()));
+    }
+
+    #[test]
+    fn test_incoming_kind_harness_when_system_reminder_leaves_nothing() {
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<system-reminder>\nJust a reminder, nothing else.\n</system-reminder>"},"uuid":"user-uuid","timestamp":"2026-09-24T21:34:40.791Z","origin":{"kind":"human"},"userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.280","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.incoming_kind(), IncomingKind::Harness);
+    }
+
+    #[test]
+    fn test_incoming_kind_peer_without_origin_via_reminder_remainder() {
+        // Real shape (survey row 1030): no `origin` field at all,
+        // `turnOrigin: "sdk"`, a leading reminder followed by a
+        // cross-session-message tag — the remainder must be reclassified,
+        // not dropped as harness.
+        let json = r#"{"parentUuid":"parent-uuid","isSidechain":false,"promptId":"prompt-id","type":"user","message":{"role":"user","content":"<system-reminder>\nThe separate session for background task task_placeholder (\"placeholder\") has ended.\n</system-reminder>\n\n<cross-session-message from=\"local_placeholder\" name=\"placeholder-sender\">\nplaceholder peer answer\n</cross-session-message>"},"uuid":"user-uuid","timestamp":"2026-09-24T23:20:34.791Z","turnOrigin":"sdk","promptSource":"sdk","userType":"external","cwd":"C:\\work","sessionId":"session-123","version":"2.1.280","gitBranch":"main"}"#;
+        let SessionEvent::User(user) = serde_json::from_str::<SessionEvent>(json).unwrap() else {
+            panic!("expected user event");
+        };
+        assert_eq!(user.turn_origin.as_deref(), Some("sdk"));
+        let IncomingKind::Peer { text, sender, .. } = user.incoming_kind() else {
+            panic!("expected Peer, got {:?}", user.incoming_kind());
+        };
+        assert_eq!(text, "placeholder peer answer");
+        assert_eq!(sender, Some("placeholder-sender".to_string()));
+    }
+
+    use crate::transcript::events::attachment::AttachmentType;
 
     #[test]
     fn test_parse_root_attachment_event() {
@@ -1398,5 +1445,77 @@ mod tests {
         let json = r#"{"type":"some-future-event-type","sessionId":"session-123","payload":{"nested":true}}"#;
         let event: SessionEvent = serde_json::from_str(json).expect("unknown root type must not fail parsing");
         assert!(matches!(event, SessionEvent::Unknown));
+    }
+
+    #[test]
+    fn test_parse_queue_operation_content_and_reason() {
+        // Real shapes (v2.1.28x): enqueue carries `content`, a `remove` that
+        // absorbed the message mid-turn also carries `reason`.
+        let enqueue: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:09:10.816Z","sessionId":"session-123","content":"placeholder queued text"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = enqueue else {
+            panic!("expected queue-operation event");
+        };
+        assert_eq!(op.content.as_deref(), Some("placeholder queued text"));
+        assert_eq!(op.reason, None);
+        assert_eq!(op.incoming_kind(), Some(IncomingKind::Owner("placeholder queued text".to_string())));
+
+        let remove: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"remove","timestamp":"2026-09-24T23:45:09.544Z","sessionId":"session-123","content":"placeholder queued text","reason":"absorbed_mid_turn"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = remove else {
+            panic!("expected queue-operation event");
+        };
+        assert_eq!(op.reason.as_deref(), Some("absorbed_mid_turn"));
+    }
+
+    #[test]
+    fn test_queue_operation_incoming_kind_excludes_task_notifications_and_peer() {
+        let notification: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123","content":"<task-notification>\n<task-id>placeholder</task-id>\n<status>completed</status>\n</task-notification>"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = notification else {
+            panic!("expected queue-operation event");
+        };
+        assert!(matches!(op.incoming_kind(), Some(IncomingKind::TaskNotification(_))));
+
+        let missing_content: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = missing_content else {
+            panic!("expected queue-operation event");
+        };
+        assert_eq!(op.incoming_kind(), None);
+
+        let peer: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T23:06:27.727Z","sessionId":"session-123","content":"<cross-session-message from=\"placeholder\">placeholder body</cross-session-message>"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = peer else {
+            panic!("expected queue-operation event");
+        };
+        assert!(matches!(op.incoming_kind(), Some(IncomingKind::Peer { .. })));
+    }
+
+    #[test]
+    fn test_queue_operation_incoming_kind_owner_text_with_leading_reminder() {
+        // Real shape (survey row 695): the enqueue's own content mirrors
+        // the later `user` delivery byte-for-byte, reminder wrapper and all.
+        let event: SessionEvent = serde_json::from_str(
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-24T21:34:40.769Z","sessionId":"session-123","content":"<system-reminder>\nThe user started your suggested background task task_placeholder (\"placeholder\") in a separate local session. It is running independently. You will be notified here when it ends.\n</system-reminder>\n\nplaceholder real owner question"}"#,
+        )
+        .unwrap();
+        let SessionEvent::QueueOperation(op) = event else {
+            panic!("expected queue-operation event");
+        };
+        assert_eq!(
+            op.incoming_kind(),
+            Some(IncomingKind::Owner("placeholder real owner question".to_string()))
+        );
     }
 }

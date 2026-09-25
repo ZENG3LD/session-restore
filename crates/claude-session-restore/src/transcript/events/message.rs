@@ -135,7 +135,7 @@ pub enum ContentBlock {
     ///
     /// See `attachment` module for detailed attachment types.
     #[serde(rename = "attachment")]
-    Attachment(crate::events::attachment::AttachmentBlock),
+    Attachment(crate::transcript::events::attachment::AttachmentBlock),
 
     /// Thinking block (extended thinking mode)
     ///
@@ -324,13 +324,13 @@ pub struct ToolResultBlock {
     /// a `type` tag that no known `ToolUseResult` shape matches (e.g. a
     /// `"text"`-tagged result missing the plain `content` field) becomes
     /// `None` instead of failing the whole enclosing event — see
-    /// [`crate::events::tool_result::deserialize_tool_use_result_lenient`].
+    /// [`crate::transcript::events::tool_result::deserialize_tool_use_result_lenient`].
     #[serde(
         rename = "toolUseResult",
-        deserialize_with = "crate::events::tool_result::deserialize_tool_use_result_lenient",
+        deserialize_with = "crate::transcript::events::tool_result::deserialize_tool_use_result_lenient",
         default
     )]
-    pub tool_use_result: Option<crate::events::tool_result::ToolUseResult>,
+    pub tool_use_result: Option<crate::transcript::events::tool_result::ToolUseResult>,
 }
 
 /// Thinking block (extended thinking mode)

@@ -14,15 +14,15 @@ Require a source provider (`codex`, `claude`, or `kimi`) and a session selector.
 | Provider | Direct load | List only when no selector is supplied or the helper reports ambiguity |
 | --- | --- | --- |
 | Codex | `codex-session-restore.exe load "<uuid-or-unambiguous-prefix-or-jsonl-path>" --json` | `codex-session-restore.exe list --json` |
-| Claude | `session-summary.exe load "<uuid-or-unambiguous-prefix-or-session-jsonl-path>"` | `session-summary.exe list` |
+| Claude | `claude-session-restore.exe load "<uuid-or-unambiguous-prefix-or-session-jsonl-path>"` | `claude-session-restore.exe list` |
 | Kimi | `kimi-session-restore.exe load "<session-id-or-unambiguous-prefix-or-session-path>"` | `kimi-session-restore.exe list` |
 
-For Claude, prefer the exact stable UUID from trusted session inventory; an unambiguous prefix of at least 16 characters or an exact JSONL path under the configured Claude home is also accepted. If a selector is missing or remains ambiguous after one list call, ask one narrow question naming the candidates.
+For Claude, prefer the exact stable UUID from trusted session inventory; an unambiguous prefix of at least 8 characters or an exact JSONL path under the configured Claude home is also accepted. If a selector is missing or remains ambiguous after one list call, ask one narrow question naming the candidates.
 
 When the harness supplies a child-only source root, bind the direct `load` command to it without printing the path:
 
 - for Codex, append `--home "$env:GATE4AGENT_RESTORE_CODEX_HOME"` when that variable is nonempty;
-- for Claude, append `--home "$env:GATE4AGENT_RESTORE_CLAUDE_HOME"` only to `session-summary.exe load` when that variable is nonempty. The Claude `list` command does not accept `--home`; if a bound source root is present but no selector was supplied, ask for the selector instead of listing a different home.
+- for Claude, append `--home "$env:GATE4AGENT_RESTORE_CLAUDE_HOME"` to `claude-session-restore.exe load` when that variable is nonempty. `list` also accepts `--home`: if a bound source root is present but no selector was supplied, run `list --home "$env:GATE4AGENT_RESTORE_CLAUDE_HOME"` against that root rather than listing a different home.
 
 These variables identify the source transcript authority only. Never assign them to the target provider's `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or user home, and never enumerate a different provider home as a fallback when a source root was supplied.
 
